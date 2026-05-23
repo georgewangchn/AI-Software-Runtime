@@ -1,0 +1,4 @@
+goal: "Rate limiter with correct threshold"
+features:
+  - name: RateLimiter
+    description: "Allow up to max_calls within period, reject when at or above limit"

@@ -1,0 +1,4 @@
+goal: "Retry decorator with correct attempt counting"
+features:
+  - name: retry
+    description: "Retry a function up to max_attempts times with delay between retries"

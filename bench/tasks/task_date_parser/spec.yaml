@@ -1,0 +1,4 @@
+goal: "Date parser with correct leap year logic"
+features:
+  - name: is_leap_year
+    description: "Correctly identify leap years including century exception rule (divisible by 400, not just 4)"

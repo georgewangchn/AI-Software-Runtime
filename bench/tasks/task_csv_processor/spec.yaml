@@ -1,0 +1,4 @@
+goal: "CSV data processor with correct aggregation"
+features:
+  - name: process_csv
+    description: "Process CSV data, count rows, and correctly accumulate total amount column"
