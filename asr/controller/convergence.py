@@ -121,7 +121,7 @@ class ASRController:
             if test_error:
                 test_failed = True
 
-            analysis_events = await self._analyzing_phase(task_id, spec, test_events)
+            analysis_events = await self._analyzing_phase(task_id, test_events)
             result.events.extend(analysis_events)
 
             spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
@@ -176,7 +176,7 @@ class ASRController:
                     events.append(evt)
         return events
 
-    async def _analyzing_phase(self, task_id: str, spec, test_events: list[Event]) -> list[Event]:
+    async def _analyzing_phase(self, task_id: str, test_events: list[Event]) -> list[Event]:
         events: list[Event] = []
         test_summary = self._extract_test_summary(test_events)
         spec_diff = SpecDiffFoundEvent(

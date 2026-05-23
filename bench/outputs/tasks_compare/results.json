@@ -1,38 +1,22 @@
 {
-  "timestamp": "2026-05-23 21:30:28",
+  "timestamp": "2026-05-23 22:25:57",
   "model": "qwen3-next-80b-a3b-instruct",
   "results": [
     {
       "task": "task_fibonacci",
-      "mode": "opencode",
-      "success": true,
-      "iterations": 1,
-      "elapsed_seconds": 0.52,
-      "token_usage": {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "estimated": true
-      },
-      "test_failures": 0,
-      "error": null,
-      "stop_reason": "all_tests_pass"
-    },
-    {
-      "task": "task_fibonacci",
       "mode": "asr",
-      "success": true,
-      "iterations": 1,
-      "elapsed_seconds": 170.47,
+      "success": false,
+      "iterations": 2,
+      "elapsed_seconds": 154.98,
       "token_usage": {
-        "prompt_tokens": 151893,
-        "completion_tokens": 2590,
-        "total_tokens": 154483,
+        "prompt_tokens": 963897,
+        "completion_tokens": 8938,
+        "total_tokens": 972835,
         "estimated": false
       },
-      "test_failures": 0,
+      "test_failures": -1,
       "error": null,
-      "stop_reason": "CONVERGED"
+      "stop_reason": "STUCK"
     }
   ]
 }

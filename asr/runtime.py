@@ -9,14 +9,11 @@ from asr.agents.builder import BuilderAgent
 from asr.agents.tester import TesterAgent
 from asr.agents.analyzer import AnalyzerAgent
 from asr.agents.runner import AgentRunner, AgentOrchestrator
-from asr.agents.llm_tracker import log_token_usage
-from asr.agents.opencode_backend import opencode_completion
-from asr.spec.compiler import SpecCompiler
 from asr.dag.decomposer import TaskDecomposer
 from asr.dag.executor import DAGExecutor
 from asr.logger import ASRLogger
 from asr.spec.models import Specification
-import yaml, re
+import yaml
 
 
 class ASRRuntime:
@@ -25,12 +22,24 @@ class ASRRuntime:
         self._event_store = EventStore(config.runtime.event_dir)
 
     async def run(
-        self, project_dir: Path, spec_path: Path, use_decoupled: bool = False,
+        self, project_dir: Path, spec_path: Path | None = None, use_decoupled: bool = False,
         progress_callback=None,
     ) -> ConvergenceResult:
-        with open(spec_path) as f:
-            spec = Specification(**yaml.safe_load(f))
+        if spec_path and spec_path.exists():
+            with open(spec_path) as f:
+                spec = Specification(**yaml.safe_load(f))
+        else:
+            spec = self._spec_from_design(project_dir)
         return await self._execute(project_dir, spec, use_decoupled, progress_callback)
+
+    def _spec_from_design(self, project_dir: Path) -> Specification:
+        for md_file in project_dir.glob("*.md"):
+            title = md_file.read_text()[:200].split("\n")[0].lstrip("# ")
+            return Specification(
+                goal=title or "Build system per design document",
+                features=[], constraints=[], acceptance=[],
+            )
+        return Specification(goal="Build system", features=[], constraints=[], acceptance=[])
 
     async def run_dag(
         self, project_dir: Path, spec_path: Path, mode: str = "features"
@@ -48,82 +57,23 @@ class ASRRuntime:
             analyzer=analyzer, mesh_agents=[],
         ).execute(dag, spec)
 
-    async def run_from_nl(
-        self, project_dir: Path, natural_language: str, use_decoupled: bool = False
-    ) -> ConvergenceResult:
-        mc = self._agent_model()
-        compiler = SpecCompiler(mc)
-        spec = await compiler.compile(natural_language)
-        spec_path = project_dir / "spec.yaml"
-        spec_path.write_text(yaml.dump(spec.model_dump(), default_flow_style=False, allow_unicode=True))
-        return await self._execute(project_dir, spec, use_decoupled)
-
-    async def build(
-        self, project_dir: Path, design_path: Path, max_iterations: int = 10
-    ) -> ConvergenceResult:
-        design_text = design_path.read_text()
-        mc = self._agent_model()
-        spec = await SpecCompiler(mc).compile(design_text)
-
-        project_dir.mkdir(parents=True, exist_ok=True)
-        spec_path = project_dir / "spec.yaml"
-        spec_path.write_text(yaml.dump(spec.model_dump(), default_flow_style=False, allow_unicode=True))
-
-        builder = self._create_builder(project_dir)
-        if builder:
-            from asr.events.models import TaskCreatedEvent, AgentName, EventType
-            evt = TaskCreatedEvent(
-                task_id="build-0", from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
-                payload={"spec": spec.model_dump(), "project_path": str(project_dir), "max_iterations": max_iterations},
-            )
-            results = await builder.process(evt)
-            for evt in results:
-                if evt.type == EventType.CODE_GENERATED:
-                    code_text = evt.payload.get("diff_text", "")
-                    if code_text:
-                        target = project_dir / (evt.payload.get("file_path") or "main.py")
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        if "@@" in code_text:
-                            from asr.patch.diff import PatchEngine
-                            for pr in PatchEngine().apply(code_text, project_dir):
-                                if pr.success and pr.content:
-                                    target.write_text(pr.content)
-                        else:
-                            target.write_text(code_text)
-
-        tests_code = await self._generate_tests(spec, mc)
-        (project_dir / "test_main.py").write_text(tests_code)
-
-        return await self._execute(project_dir, spec, False, progress_callback=None)
-
-    async def _generate_tests(self, spec, mc) -> str:
-        messages = [
-            {"role": "system", "content": "Generate pytest tests with fastapi.testclient.TestClient. Import from main. Output ONLY Python code, no markdown."},
-            {"role": "user", "content": f"Spec:\n{yaml.dump(spec.model_dump(), allow_unicode=True)}\n\nGenerate pytest tests verifying all features and acceptance criteria."},
-        ]
-        for attempt in range(3):
-            user = messages[-1]["content"] if messages else ""
-            system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
-            prompt = f"{system}\n\n{user}" if system else user
-            text, pt, ct, tt = await opencode_completion(prompt, Path("/tmp"))
-            log_token_usage("runtime_test_gen", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
-            content = text
-            content = re.sub(r"```python\s*", "", content)
-            content = re.sub(r"```\s*$", "", content)
-            content = content.strip()
-            if content and "def test_" in content:
-                return content
-            if attempt < 2:
-                messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content": "Invalid. Generate ONLY pytest test functions. No markdown."})
-        return content or "# tests failed to generate"
-
     async def _execute(
         self, project_dir: Path, spec, use_decoupled: bool, progress_callback=None
     ) -> ConvergenceResult:
         builder = self._create_builder(project_dir)
         tester = self._create_tester(project_dir)
         analyzer = self._create_analyzer(project_dir)
+
+        if not any(project_dir.rglob("*.py")):
+            if builder:
+                from asr.events.models import TaskCreatedEvent, AgentName
+                evt = TaskCreatedEvent(
+                    task_id="greenfield-0", from_agent=AgentName.CONTROLLER,
+                    to_agent=AgentName.BUILDER,
+                    payload={"spec": spec.model_dump(), "project_path": str(project_dir),
+                             "max_iterations": self._config.convergence.max_iterations},
+                )
+                await builder.process(evt)
 
         failures = await self._quick_test(project_dir, tester)
         if len(failures) > 1:

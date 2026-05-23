@@ -16,7 +16,7 @@ def cli():
 
 @cli.command()
 @click.option("--project", required=True, type=click.Path(exists=True), help="Project directory")
-@click.option("--spec", required=True, type=click.Path(exists=True), help="Spec YAML file")
+@click.option("--spec", default=None, type=click.Path(exists=True), help="Spec YAML file (optional; reads DESIGN.md if omitted)")
 @click.option("--config", "config_path", default=None, type=click.Path(exists=True), help="Config YAML file")
 @click.option("--max-iterations", default=None, type=int, help="Override max iterations")
 @click.option("--decoupled", is_flag=True, help="Use decoupled A2A mode (AgentRunner)")
@@ -29,13 +29,13 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
         config.convergence.max_iterations = max_iterations
 
     project_dir = Path(project).resolve()
-    spec_path = Path(spec).resolve()
+    spec_path = Path(spec).resolve() if spec else None
     runtime = ASRRuntime(config)
 
     mode = "decoupled A2A" if decoupled else "direct"
     click.echo(f"ASR Runtime [{mode}]")
     click.echo(f"Project: {project_dir}")
-    click.echo(f"Spec: {spec_path}")
+    click.echo(f"Spec: {spec_path or '(from DESIGN.md)'}")
     click.echo(f"Max iterations: {config.convergence.max_iterations}")
     click.echo()
 
@@ -75,49 +75,6 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
         click.echo(f"Iterations: {result.iterations} | Events: {len(result.events)}")
         click.echo(f"\n📁 详细日志: .runtime/logs/asr.log")
         click.echo(f"📁 LLM 追踪: .runtime/logs/llm.log")
-
-
-@cli.command(name="run-nl")
-@click.option("--project", required=True, type=click.Path(exists=True), help="Project directory")
-@click.option("--requirement", "-r", required=True, help="Natural language requirement")
-@click.option("--config", "config_path", default=None, type=click.Path(exists=True), help="Config YAML file")
-@click.option("--max-iterations", default=None, type=int, help="Override max iterations")
-@click.option("--decoupled", is_flag=True, help="Use decoupled A2A mode")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-def run_nl(project, requirement, config_path, max_iterations, decoupled, verbose):
-    from asr.controller.convergence import ConvergenceState
-
-    config = load_config(config_path) if config_path else create_default_config()
-    if max_iterations:
-        config.convergence.max_iterations = max_iterations
-
-    project_dir = Path(project).resolve()
-    runtime = ASRRuntime(config)
-
-    mode = "decoupled A2A" if decoupled else "direct"
-    click.echo(f"ASR Runtime [{mode}] — NL Mode")
-    click.echo(f"Project: {project_dir}")
-    click.echo(f"Requirement: {requirement[:100]}...")
-    click.echo()
-
-    click.echo("Compiling spec from natural language...")
-
-    async def _run():
-        return await runtime.run_from_nl(project_dir, requirement, use_decoupled=decoupled)
-
-    result = asyncio.run(_run())
-
-    click.echo()
-    dag_info = result.summary.get("dag", {}) if result.summary else {}
-    if dag_info:
-        click.echo(f"Mode: DAG | Nodes: {dag_info.get('total_nodes', '?')} | Converged: {dag_info.get('converged', '?')} | Stuck: {dag_info.get('stuck', '?')}")
-    elif result.state == ConvergenceState.CONVERGED:
-        click.echo("✅ CONVERGED")
-    else:
-        click.echo(f"❌ STUCK — {result.events[-1].payload.get('reason', 'unknown') if result.events else 'unknown'}")
-
-    click.echo(f"Iterations: {result.iterations}")
-    click.echo(f"Total events: {len(result.events)}")
 
 
 @cli.command(name="run-dag")
@@ -177,35 +134,6 @@ def compare(project, spec, baseline):
     click.echo(f"Project: {project}")
     click.echo(f"Baseline: {baseline}")
     click.echo("Run 'python scripts/run_demo.py' for full demo comparison")
-
-
-@cli.command(name="build")
-@click.option("--design", required=True, type=click.Path(exists=True), help="Design document (.md)")
-@click.option("--project", required=True, type=click.Path(), help="Output project directory")
-@click.option("--config", "config_path", default=None, type=click.Path(exists=True), help="Config YAML file")
-@click.option("--max-iterations", default=10, type=int, help="Max convergence iterations")
-def build(design, project, config_path, max_iterations):
-    config = load_config(config_path) if config_path else create_default_config()
-    config.convergence.max_iterations = max_iterations
-    runtime = ASRRuntime(config)
-    design_path = Path(design).resolve()
-    project_dir = Path(project).resolve()
-    click.echo(f"ASR Build — {design_path}")
-    click.echo(f"Output: {project_dir}")
-    click.echo()
-
-    async def _run():
-        return await runtime.build(project_dir, design_path, max_iterations)
-
-    result = asyncio.run(_run())
-    click.echo()
-    _show_progress(result)
-    click.echo()
-    if result.state == "converged":
-        click.echo("✅ BUILD COMPLETE")
-    else:
-        click.echo(f"❌ STUCK")
-    click.echo(f"Iterations: {result.iterations} | Events: {len(result.events)}")
 
 
 def _show_progress(result) -> None:

@@ -20,7 +20,6 @@ from asr.events.models import (
     ErrorOccurredEvent,
 )
 from asr.events.store import EventStore
-from asr.spec.models import Specification
 
 
 @dataclass
@@ -160,7 +159,7 @@ class AnalyzerAgent(BaseAgent):
     ) -> list[dict]:
         system_prompt = self._config.system_prompt or (
             "You are an AnalyzerAgent. Compare the implementation code against the design document. "
-            "First determine task_type: dev/greenfield (no code yet), bugfix, optimize. "
+            "First determine task_type: dev, bugfix, or optimize. "
             "Output YAML with: task_type, missing_features, logic_issues, constraint_violations. "
             "Leave empty lists if everything matches the design."
         )
@@ -168,48 +167,20 @@ class AnalyzerAgent(BaseAgent):
         code_parts = []
         total_chars = 0
         for name, content in code_files.items():
-            if total_chars < 6000:
+            if total_chars < 8000:
                 code_parts.append(f"--- {name} ---\n{content}")
                 total_chars += len(content)
 
-        user_prompt = (
-            f"Design Document:\n{design_text[:6000]}\n\n"
-            f"Current Implementation:\n" + "\n\n".join(code_parts) + "\n\n"
-            f"Test Summary: {json.dumps(test_summary) if test_summary else 'no tests yet'}\n\n"
-            f"Analyze gaps between the design document and the implementation."
-        )
-
-        code_parts = []
-        total_chars = 0
-        max_chars = 32000
-        for name, content in code_files.items():
-            chunk = f"--- {name} ---\n{content}"
-            if total_chars + len(chunk) > max_chars:
-                code_parts.append(f"--- {name} ---\n... (truncated, {len(content)} chars)")
-                break
-            code_parts.append(chunk)
-            total_chars += len(chunk)
-        code_text = "\n\n".join(code_parts)
-
-        code_text = "\n\n".join(
-            f"--- {name} ---\n{content}" for name, content in code_files.items()
-        )
-
         test_text = (
             f"Test results: {test_summary.get('passed', 0)} passed, "
-            f"{test_summary.get('failed', 0)} failed out of {test_summary.get('total', 0)}.\n"
-            f"Failures: {json.dumps(test_summary.get('failures', []), indent=2)}"
+            f"{test_summary.get('failed', 0)} failed"
         ) if test_summary else "No test results available."
 
         user_prompt = (
-            f"Specification:\n{json.dumps(spec.model_dump(), indent=2)}\n\n"
-            f"Implementation code:\n{code_text}\n\n"
+            f"Design Document:\n{design_text[:8000]}\n\n"
+            f"Current Implementation:\n" + "\n\n".join(code_parts) + "\n\n"
             f"{test_text}\n\n"
-            f"Analyze the code against the spec. Output YAML:\n"
-            f"missing_features: []\n"
-            f"logic_issues: []\n"
-            f"constraint_violations: []\n"
-            f"Only populate lists if issues are found."
+            f"Analyze gaps between the design document and the implementation. Output YAML."
         )
 
         return [

@@ -5,11 +5,11 @@
   Tasks: 1
 ======================================================================
 
-  opencode     Pass: 1/1 (100%)   Avg: 1s  Tokens: 0
-  asr          Pass: 1/1 (100%)   Avg: 170s  Tokens: 154,483
+  opencode     Pass: N/A          Avg: 0s  Tokens: 0
+  asr          Pass: 0/1 (0%)     Avg: 155s  Tokens: 972,835
 
   Task                      opencode   asr       
   ---------------------------------------------
-  task_fibonacci            PASS       PASS      
+  task_fibonacci            FAIL       FAIL      
 
 ======================================================================

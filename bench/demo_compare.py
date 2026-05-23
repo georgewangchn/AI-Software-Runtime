@@ -234,7 +234,7 @@ def run_opencode(project_dir: Path, max_iterations: int = 10) -> RunResult:
 
         cmd = [
             "opencode", "run",
-            "--model", "local/qwen3-next-80b-a3b-instruct",
+            "--model", "qwen/qwen3-next-80b-a3b-instruct",
             "--dangerously-skip-permissions",
             "--format", "json",
             "--dir", str(project_dir),
@@ -267,7 +267,7 @@ def run_opencode(project_dir: Path, max_iterations: int = 10) -> RunResult:
 
 
 def run_asr(project_dir: Path, max_iterations: int = 10) -> RunResult:
-    """Run ASR Runtime: use spec.yaml if present, else natural language."""
+    """Run ASR Runtime. Uses spec.yaml if present, else reads DESIGN.md."""
     start = time.time()
 
     runtime_dir = project_dir / ".runtime"
@@ -277,21 +277,14 @@ def run_asr(project_dir: Path, max_iterations: int = 10) -> RunResult:
     if cwd_runtime.exists():
         shutil.rmtree(cwd_runtime, ignore_errors=True)
 
+    cmd = [
+        sys.executable, "-m", "asr.cli.main", "run",
+        "--project", str(project_dir),
+        "--max-iterations", str(max_iterations),
+    ]
     spec_path = project_dir / "spec.yaml"
     if spec_path.exists():
-        cmd = [
-            sys.executable, "-m", "asr.cli.main", "run",
-            "--project", str(project_dir),
-            "--spec", str(spec_path),
-            "--max-iterations", str(max_iterations),
-        ]
-    else:
-        cmd = [
-            sys.executable, "-m", "asr.cli.main", "run-nl",
-            "--project", str(project_dir),
-            "--requirement", ISSUE_DESCRIPTION,
-            "--max-iterations", str(max_iterations),
-        ]
+        cmd.extend(["--spec", str(spec_path)])
 
     combined_path = f"{ROOT}:{project_dir}:{os.environ.get('PYTHONPATH', '')}"
     result = subprocess.run(

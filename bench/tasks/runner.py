@@ -144,7 +144,7 @@ def run_opencode(workspace, task_name, task_dir, max_iterations=10):
 
         cmd = [
             "opencode", "run",
-            "--model", "local/qwen3-next-80b-a3b-instruct",
+            "--model", "qwen/qwen3-next-80b-a3b-instruct",
             "--dangerously-skip-permissions",
             "--format", "json",
             "--dir", str(workspace),
@@ -186,18 +186,14 @@ def run_asr(workspace, task_name, task_dir, max_iterations=10):
 
     spec_path = workspace / "spec.yaml"
     spec_src = task_dir / "spec.yaml"
-    if spec_src.exists() and not spec_path.exists():
+    if spec_src.exists():
         shutil.copy2(spec_src, spec_path)
 
+    cmd = [sys.executable, "-m", "asr.cli.main", "run",
+           "--project", str(workspace),
+           "--max-iterations", str(max_iterations)]
     if spec_path.exists():
-        cmd = [sys.executable, "-m", "asr.cli.main", "run",
-               "--project", str(workspace), "--spec", str(spec_path),
-               "--max-iterations", str(max_iterations)]
-    else:
-        readme = (task_dir / "README.md").read_text() if (task_dir / "README.md").exists() else task_name
-        cmd = [sys.executable, "-m", "asr.cli.main", "run-nl",
-               "--project", str(workspace), "--requirement", readme,
-               "--max-iterations", str(max_iterations)]
+        cmd.extend(["--spec", str(spec_path)])
     try:
         result = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
                                 timeout=max_iterations * 300,

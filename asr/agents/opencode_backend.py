@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-OPENCODE_MODEL = os.environ.get("ASR_OPENCODE_MODEL", "local/qwen3-next-80b-a3b-instruct")
+OPENCODE_MODEL = os.environ.get("ASR_OPENCODE_MODEL", "qwen/qwen3-next-80b-a3b-instruct")
 OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "120"))
 
 
