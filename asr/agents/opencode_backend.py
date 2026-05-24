@@ -10,7 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-OPENCODE_MODEL = os.environ.get("ASR_OPENCODE_MODEL", "qwen/qwen3-next-80b-a3b-instruct")
+OPENCODE_MODEL = os.environ.get("ASR_OPENCODE_MODEL", "local/qwen3-next-80b-a3b-instruct")
 OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "120"))
 
 
@@ -91,6 +91,12 @@ async def opencode_completion(prompt: str, project_dir: Path,
 def opencode_diff(prompt: str, project_dir: Path, session_id: str | None = None,
                   timeout: int = OPENCODE_TIMEOUT) -> tuple[str, str | None, int, int, int]:
     text, new_sid, pt, ct, tt = _run_opencode(prompt, project_dir, session_id, timeout)
+
+    if not (project_dir / ".git").exists():
+        subprocess.run(["git", "init"], cwd=str(project_dir), capture_output=True, timeout=10)
+        subprocess.run(["git", "add", "-A"], cwd=str(project_dir), capture_output=True, timeout=10)
+        subprocess.run(["git", "commit", "-m", "asr_init", "--allow-empty"],
+                       cwd=str(project_dir), capture_output=True, timeout=10)
 
     subprocess.run(["git", "add", "-A"], cwd=str(project_dir),
                    capture_output=True, timeout=10)

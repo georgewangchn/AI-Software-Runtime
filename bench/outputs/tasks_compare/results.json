@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-05-23 22:25:57",
+  "timestamp": "2026-05-24 11:38:48",
   "model": "qwen3-next-80b-a3b-instruct",
   "results": [
     {
@@ -7,11 +7,11 @@
       "mode": "asr",
       "success": false,
       "iterations": 2,
-      "elapsed_seconds": 154.98,
+      "elapsed_seconds": 369.6,
       "token_usage": {
-        "prompt_tokens": 963897,
-        "completion_tokens": 8938,
-        "total_tokens": 972835,
+        "prompt_tokens": 922648,
+        "completion_tokens": 7541,
+        "total_tokens": 930189,
         "estimated": false
       },
       "test_failures": -1,

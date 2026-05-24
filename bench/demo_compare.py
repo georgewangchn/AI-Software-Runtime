@@ -218,23 +218,32 @@ def run_opencode(project_dir: Path, max_iterations: int = 10) -> RunResult:
 
         if iteration == 1:
             prompt = (
-                f"Fix ALL bugs in this FastAPI application. "
-                f"Read the code, identify each bug, apply fixes. "
-                f"Do NOT modify test files.\n\n"
-                f"Issue: {ISSUE_DESCRIPTION}"
+                f"Read the code and the issue description below. "
+                f"Identify all bugs and fix them by editing the code directly.\n\n"
+                f"Issue:\n{ISSUE_DESCRIPTION}"
             )
         else:
-            test_summary = test_output[-4000:] if len(test_output) > 4000 else test_output
-            prompt = (
-                f"Previous fix attempt failed. {failures} tests still failing. "
-                f"Read the code, identify remaining bugs, apply fixes. "
-                f"Do NOT modify test files.\n\n"
-                f"Test failures:\n{test_summary}"
-            )
+            test_summary = test_output[-3000:] if len(test_output) > 3000 else test_output
+            if failures > 0:
+                prompt = (
+                    f"Iteration {iteration}/{max_iterations}. {failures} tests still failing. "
+                    f"Read the test failures below, identify root causes, fix the code.\n\n"
+                    f"Test failures:\n{test_summary}"
+                )
+            else:
+                prompts = [
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. "
+                    f"Rate the codebase 1-10. Identify weaknesses. Apply improvements.",
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. "
+                    f"From first principles: find rational and irrational parts. Optimize the irrational.",
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. "
+                    f"Review the issue description. Check for missed cases. Complete the fixes.",
+                ]
+                prompt = prompts[(iteration - 2) % len(prompts)]
 
         cmd = [
             "opencode", "run",
-            "--model", "qwen/qwen3-next-80b-a3b-instruct",
+            "--model", "local/qwen3-next-80b-a3b-instruct",
             "--dangerously-skip-permissions",
             "--format", "json",
             "--dir", str(project_dir),

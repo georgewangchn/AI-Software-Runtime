@@ -91,19 +91,24 @@ class ASRController:
         )
         self._write_and_log(task_event, result)
 
-        analysis_events: list[Event] = []
+        prev_failures: list[dict] = []
+        prev_feedback: list[str] = []
         before_count = 0
 
         while iteration < self._config.convergence.max_iterations:
             iteration += 1
             result.iterations = iteration
 
+            repair_events = await self._repairing_phase(task_id, prev_failures, prev_feedback)
+            result.events.extend(repair_events)
+            if progress_callback:
+                progress_callback(iteration, 0, "BUILDING", False, False)
+
             test_events = await self._testing_phase(task_id)
             result.events.extend(test_events)
 
             test_failed = any(e.type == EventType.TEST_FAILED for e in test_events)
             test_error = any(e.type == EventType.TEST_ERROR for e in test_events)
-            test_passed = any(e.type == EventType.TEST_PASSED for e in test_events)
             after_count = _count_failures(test_events)
 
             if progress_callback:
@@ -112,10 +117,6 @@ class ASRController:
             if before_count > 0 and after_count > before_count and self._rollback_entries:
                 self._patch_engine.rollback(self._rollback_entries)
                 self._rollback_entries.clear()
-                self._write_and_log(PatchRolledBackEvent(
-                    task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.SYSTEM,
-                    payload={"reason": f"degradation: {before_count}→{after_count}"},
-                ), result)
             before_count = after_count
 
             if test_error:
@@ -125,33 +126,25 @@ class ASRController:
             result.events.extend(analysis_events)
 
             spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
-            if spec_aligned and not test_failed and not test_error:
+            if progress_callback:
+                progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned)
+            if not test_failed and not test_error and spec_aligned:
                 self._emit_converged(task_id, iteration, result)
                 return result
 
-            repair_events = await self._repairing_phase(task_id, test_events, analysis_events)
-            result.events.extend(repair_events)
-
-            if progress_callback:
-                progress_callback(iteration, after_count, "REPAIRING", test_failed, test_error)
-
-            patch_success = any(e.type == EventType.PATCH_APPLIED and e.payload.get("success")
-                                for e in repair_events)
-            if patch_success and self._logger:
-                self._logger.log_convergence(iteration, after_count, "REPAIRING", "patch applied")
-
-            if self._detect_stable_diff():
-                self._emit_stuck(task_id, iteration, "stable_diff", test_events, result)
-                return result
-
-            if self._detect_patch_oscillation():
-                self._emit_stuck(task_id, iteration, "patch_oscillation", test_events, result)
-                return result
+            prev_failures = []
+            for evt in test_events:
+                if evt.type == EventType.TEST_FAILED:
+                    prev_failures.extend(evt.payload.get("failures", []))
+            prev_feedback = []
+            for evt in analysis_events:
+                if evt.type == EventType.ANALYZER_FEEDBACK:
+                    prev_feedback.extend(evt.payload.get("findings", []))
 
             self._write_and_log(ConvergenceIterationEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.SYSTEM,
                 payload={"iteration": iteration, "errors_remaining": after_count,
-                         "phase": "REPAIRING", "detail": f"patch {'ok' if patch_success else 'failed'}"},
+                         "phase": "REPAIRING", "detail": "continuing"},
             ), result)
 
         self._emit_stuck(task_id, iteration, "max_iterations", [], result)
@@ -199,23 +192,9 @@ class ASRController:
         return events
 
     async def _repairing_phase(
-        self, task_id: str, test_events: list[Event], analysis_events: list[Event]
+        self, task_id: str, failures: list[dict], feedback: list[str]
     ) -> list[Event]:
         events: list[Event] = []
-        failures = []
-        for evt in test_events:
-            if evt.type == EventType.TEST_FAILED:
-                failures.extend(evt.payload.get("failures", []))
-            elif evt.type == EventType.TEST_ERROR:
-                failures.append({
-                    "nodeid": "compile",
-                    "message": evt.payload.get("error_message", "unknown error")[:200],
-                    "traceback": "",
-                })
-        feedback = []
-        for evt in analysis_events:
-            if evt.type == EventType.ANALYZER_FEEDBACK:
-                feedback.extend(evt.payload.get("findings", []))
 
         if self._builder and (failures or feedback):
             patch_request = PatchGeneratedEvent(

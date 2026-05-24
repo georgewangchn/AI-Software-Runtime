@@ -29,17 +29,13 @@ class ASRRuntime:
             with open(spec_path) as f:
                 spec = Specification(**yaml.safe_load(f))
         else:
-            spec = self._spec_from_design(project_dir)
+            spec = Specification(goal=self._design_title(project_dir))
         return await self._execute(project_dir, spec, use_decoupled, progress_callback)
 
-    def _spec_from_design(self, project_dir: Path) -> Specification:
+    def _design_title(self, project_dir: Path) -> str:
         for md_file in project_dir.glob("*.md"):
-            title = md_file.read_text()[:200].split("\n")[0].lstrip("# ")
-            return Specification(
-                goal=title or "Build system per design document",
-                features=[], constraints=[], acceptance=[],
-            )
-        return Specification(goal="Build system", features=[], constraints=[], acceptance=[])
+            return md_file.read_text()[:200].split("\n")[0].lstrip("# ")
+        return "Build system per design document"
 
     async def run_dag(
         self, project_dir: Path, spec_path: Path, mode: str = "features"
@@ -165,10 +161,9 @@ class ASRRuntime:
     def _agent_model(self) -> ModelConfig:
         return self._config.agents[0].model if self._config.agents else ModelConfig(model="none")
 
-    def _preview_nodes(self, spec, project_dir: Path) -> list:
-        from asr.dag.models import TaskNode
+    def _preview_nodes(self, spec: dict, project_dir: Path) -> list:
         nodes = []
-        for i, feature in enumerate(spec.features):
+        for i, feature in enumerate(spec.get("features", [])):
             name_lower = feature.name.lower()
             candidates = []
             for py_file in project_dir.rglob("*.py"):

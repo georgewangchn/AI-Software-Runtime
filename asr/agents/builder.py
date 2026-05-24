@@ -8,12 +8,8 @@ from asr.agents.llm_tracker import log_token_usage
 from asr.agents.opencode_backend import opencode_diff_async
 from asr.config.models import AgentConfig
 from asr.events.models import (
-    Event,
-    EventType,
-    AgentName,
-    CodeGeneratedEvent,
-    PatchGeneratedEvent,
-    ErrorOccurredEvent,
+    Event, EventType, AgentName,
+    CodeGeneratedEvent, PatchGeneratedEvent, ErrorOccurredEvent,
 )
 from asr.events.store import EventStore
 from asr.spec.models import Specification
@@ -51,7 +47,7 @@ class BuilderAgent(BaseAgent):
         return await self._generate_initial_code(event.task_id, spec)
 
     async def _generate_initial_code(self, task_id: str, spec: Specification) -> list[Event]:
-        prompt = self._build_initial_prompt(spec)
+        prompt = self._build_task_prompt()
         diff_text = await self._call_opencode(prompt)
         return [CodeGeneratedEvent(
             task_id=task_id, from_agent=AgentName.BUILDER,
@@ -69,14 +65,13 @@ class BuilderAgent(BaseAgent):
         return await self._generate_patch(event.task_id, failures, feedback)
 
     async def _generate_patch(self, task_id: str, failures: list[dict], feedback: list[str]) -> list[Event]:
-        code_files = self._read_project_files()
-        prompt = self._build_patch_prompt(failures, feedback, code_files)
+        prompt = self._build_patch_prompt(failures, feedback)
         diff_text = await self._call_opencode(prompt)
         return [PatchGeneratedEvent(
             task_id=task_id, from_agent=AgentName.BUILDER,
             to_agent=AgentName.CONTROLLER,
             payload={"file_path": "main.py", "diff_text": diff_text,
-                     "reason": f"Fix {len(failures)} test failures"},
+                     "reason": f"Fix {len(failures)} test failures" if failures else "Apply improvements"},
         )]
 
     async def _call_opencode(self, prompt: str) -> str:
@@ -86,54 +81,39 @@ class BuilderAgent(BaseAgent):
                         {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
         if sid:
             self._opencode_session_id = sid
-        if diff and diff != "no changes":
-            return diff
-        return "```diff\n" + diff + "\n```"
+        return diff if diff and diff != "no changes" else "```diff\n" + diff + "\n```"
 
-    def _build_initial_prompt(self, spec: Specification) -> str:
-        system = self._config.system_prompt or (
-            "You are a BuilderAgent. Generate code from design documents. "
-            "Output valid Python code. Do NOT write test files."
+    def _build_task_prompt(self) -> str:
+        return (
+            "1. 读取 DESIGN.md 了解系统设计\n"
+            "2. 根据设计完成开发\n"
+            "3. git add -A && git commit -m 'builder'\n"
         )
-        design_text = ""
-        for md_file in self._project_dir.glob("*.md"):
-            design_text = md_file.read_text()[:8000]
-            break
-        user = (
-            f"Generate a Python project matching this design document:\n\n"
-            f"{design_text}\n\n"
-            f"Output the complete Python code implementing the core system."
-        )
-        return f"[SYSTEM]\n{system}\n\n[USER]\n{user}"
 
-    def _build_patch_prompt(self, failures: list[dict], feedback: list[str],
-                            code_files: dict[str, str]) -> str:
-        system = self._config.system_prompt or (
-            "You are a BuilderAgent. Generate unified diffs to fix test failures. "
-            "Only modify files that need changes. Do NOT modify test files."
+    def _build_patch_prompt(self, failures: list[dict], feedback: list[str]) -> str:
+        base = (
+            "读取 DESIGN.md 了解系统设计\n"
         )
-        failure_text = "\n".join(
-            f"- {f.get('nodeid', 'unknown')}: {f.get('message', 'no message')}"
-            for f in failures
-        )
-        feedback_text = "\n".join(f"- {fb}" for fb in feedback) if feedback else "none"
-        code_text = "\n\n".join(
-            f"--- {name} ---\n{content}" for name, content in code_files.items()
-        ) if code_files else "(no project files found)"
-
-        user = (
-            f"Current code in project:\n{code_text}\n\n"
-            f"The following tests are failing:\n{failure_text}\n\n"
-            f"Analyzer feedback:\n{feedback_text}\n\n"
-            f"Target file to patch: main.py\n"
-            f"Generate a unified diff that fixes these failures."
-        )
-        return f"[SYSTEM]\n{system}\n\n[USER]\n{user}"
-
-    def _read_project_files(self) -> dict[str, str]:
-        files = {}
-        for py_file in self._project_dir.rglob("*.py"):
-            if "test_" not in py_file.name and "__pycache__" not in str(py_file):
-                rel = str(py_file.relative_to(self._project_dir))
-                files[rel] = py_file.read_text()
-        return files
+        if failures:
+            failure_text = "\n".join(
+                f"- {f.get('nodeid', 'unknown')}: {f.get('message', 'no message')}"
+                for f in failures
+            )
+            base += (
+                f"以下测试失败，分析根因并修复代码：\n{failure_text}\n"
+            )
+        elif feedback:
+            base += (
+                f"发现以下开发的系统与 DESIGN.md 的偏差，修复：\n" +
+                "\n".join(f"- {fb}" for fb in feedback) + "\n"
+            )
+        else:
+            import random
+            opts = [
+                "评分 1-10，找出弱点并改进",
+                "从第一性原理出发，找出合理与不合理之处，优化不合理部分",
+                "对照 DESIGN.md 检查遗漏功能，补全",
+                "检查代码质量：重复、不清晰、缺错误处理，重构",
+            ]
+            base += random.choice(opts) + "\n"
+        return base

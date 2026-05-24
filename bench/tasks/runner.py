@@ -132,19 +132,31 @@ def run_opencode(workspace, task_name, task_dir, max_iterations=10):
                              stop_reason="all_tests_pass")
 
         if iteration == 1:
-            prompt = f"Fix ALL bugs. Task: {readme}"
+            prompt = f"Task: {readme}\n\nRead the code and design docs. Implement the requirements. Create/improve code files directly."
         else:
-            test_summary = test_output[-4000:] if len(test_output) > 4000 else test_output
-            prompt = (
-                f"Previous fix attempt failed. {failures} tests still failing. "
-                f"Read the code, identify remaining bugs, apply fixes. "
-                f"Do NOT modify test files.\n\n"
-                f"Test failures:\n{test_summary}"
-            )
+            test_summary = test_output[-3000:] if len(test_output) > 3000 else test_output
+            if failures > 0:
+                prompt = (
+                    f"Iteration {iteration}/{max_iterations}. {failures} tests still failing. "
+                    f"Read the test output below, identify root causes, and fix the code.\n\n"
+                    f"Test failures:\n{test_summary}"
+                )
+            else:
+                prompts = [
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. Now optimize the system. "
+                    f"Rate the codebase 1-10. Identify weaknesses and improvements. "
+                    f"Then apply the improvements directly.",
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. From first principles, "
+                    f"analyze what is rational and irrational in the current implementation. "
+                    f"Propose and apply optimizations for the irrational parts.",
+                    f"Iteration {iteration}/{max_iterations}. All tests pass. Review the design document. "
+                    f"Check for missing features or incomplete implementations. Fill the gaps.",
+                ]
+                prompt = prompts[(iteration - 2) % len(prompts)]
 
         cmd = [
             "opencode", "run",
-            "--model", "qwen/qwen3-next-80b-a3b-instruct",
+            "--model", "local/qwen3-next-80b-a3b-instruct",
             "--dangerously-skip-permissions",
             "--format", "json",
             "--dir", str(workspace),

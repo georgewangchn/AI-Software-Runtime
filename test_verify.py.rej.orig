@@ -1,0 +1,304 @@
+@@ -0,0 +1,302 @@
++import os
++import shutil
++import tempfile
++import json
++from unittest.mock import patch, MagicMock
++import pytest
++from datetime import datetime
++
++from runtime.orchestrator import Orchestrator
++
++
++class TestOrchestrator:
++    """Test suite for the Research Report Compiler Orchestrator"""
++    
++    @pytest.fixture
++    def temp_pack_dir(self):
++        """Create a temporary directory with a valid pack.yaml"""
++        temp_dir = tempfile.mkdtemp()
++        
++        
++        pack_yaml_content = """
++agents:
++  - id: requirement_agent
++    depends_on: []
++    step: 1
++    enabled: true
++  - id: feature_agent
++    depends_on: [requirement_agent]
++    step: 2
++    enabled: true
++  - id: software_arch_agent
++    depends_on: [feature_agent]
++    step: 3
++    enabled: true
++  - id: hardware_agent
++    depends_on: [software_arch_agent]
++    step: 4
++    enabled: true
++  - id: budget_agent
++    depends_on: [hardware_agent]
++    step: 5
++    enabled: true
++"""
++        
++        pack_file = os.path.join(temp_dir, "pack.yaml")
++        with open(pack_file, 'w', encoding='utf-8') as f:
++            f.write(pack_yaml_content)
++        
++        
++        logs_dir = os.path.join(temp_dir, "runtime", "logs")
++        os.makedirs(logs_dir, exist_ok=True)
++        
++        yield temp_dir
++        
++        
++        shutil.rmtree(temp_dir)
++    
++    @pytest.fixture
++    def orchestrator(self, temp_pack_dir):
++        """Create an Orchestrator instance with temp pack directory"""
++        return Orchestrator(temp_pack_dir)
++    
++    def test_initialization_with_valid_pack_path(self, temp_pack_dir):
++        """Test that Orchestrator initializes successfully with valid pack path"""
++        orchestrator = Orchestrator(temp_pack_dir)
++        
++        assert orchestrator.pack_path == temp_pack_dir
++        assert isinstance(orchestrator.fact_graph, dict)
++        assert isinstance(orchestrator.patch_log, list)
++        assert isinstance(orchestrator.agent_configs, dict)
++        assert len(orchestrator.agent_configs) == 5
++        assert "requirement_agent" in orchestrator.agent_configs
++        assert "feature_agent" in orchestrator.agent_configs
++        assert "software_arch_agent" in orchestrator.agent_configs
++        assert "hardware_agent" in orchestrator.agent_configs
++        assert "budget_agent" in orchestrator.agent_configs
++        
++        agent_config = orchestrator.agent_configs["requirement_agent"]
++        assert agent_config["depends_on"] == []
++        assert agent_config["step"] == 1
++        assert agent_config["enabled"] is True
++    
++    def test_initialization_with_missing_pack_yaml(self):
++        """Test that Orchestrator raises FileNotFoundError when pack.yaml is missing"""
++        temp_dir = tempfile.mkdtemp()
++        
++        with pytest.raises(FileNotFoundError):
++            Orchestrator(temp_dir)
++        
++        shutil.rmtree(temp_dir)
++    
++    def test_load_pack_config_parsing(self, temp_pack_dir):
++        """Test that _load_pack_config correctly parses agent configurations from pack.yaml"""
++        orchestrator = Orchestrator(temp_pack_dir)
++        
++        
++        assert len(orchestrator.agent_configs) == 5
++        
++        
++        config = orchestrator.agent_configs["feature_agent"]
++        assert config["depends_on"] == ["requirement_agent"]
++        assert config["step"] == 2
++        assert config["enabled"] is True
++        
++        
++        assert len(orchestrator.step_view_map) == 5
++        assert orchestrator.step_view_map["requirement_agent"] == 1
++        assert orchestrator.step_view_map["feature_agent"] == 2
++        assert orchestrator.step_view_map["software_arch_agent"] == 3
++        assert orchestrator.step_view_map["hardware_agent"] == 4
++        assert orchestrator.step_view_map["budget_agent"] == 5
++    
++    def test_build_graph_creates_correct_nodes_and_edges(self, temp_pack_dir):
++        """Test that _build_graph creates correct LangGraph nodes and edges"""
++        orchestrator = Orchestrator(temp_pack_dir)
++        
++        
++        assert len(orchestrator.graph.nodes) == 5
++        assert "requirement_agent" in orchestrator.graph.nodes
++        assert "feature_agent" in orchestrator.graph.nodes
++        assert "software_arch_agent" in orchestrator.graph.nodes
++        assert "hardware_agent" in orchestrator.graph.nodes
++        assert "budget_agent" in orchestrator.graph.nodes
++        
++        
++        assert orchestrator.graph._edges == [("requirement_agent", "feature_agent"), 
++                                           ("feature_agent", "software_arch_agent"), 
++                                           ("software_arch_agent", "hardware_agent"), 
++                                           ("hardware_agent", "budget_agent")]
++        
++        
++        assert orchestrator.graph.entry_point == "requirement_agent"
++    
++    def test_create_agent_node_returns_proper_function(self, orchestrator):
++        """Test that _create_agent_node returns a function that properly executes an agent"""
++        agent_node_func = orchestrator._create_agent_node("requirement_agent")
++        
++        
++        assert callable(agent_node_func)
++        
++        
++        state = {}
++        result = agent_node_func(state)
++        
++        
++        assert result == state
++        
++        
++    
++    @patch("runtime.orchestrator.__import__")
++    def test_execute_agent_dynamically_imports_and_calls_agent_module(self, mock_import, orchestrator):
++        """Test that _execute_agent dynamically imports agent module and calls its execute function"""
++        mock_agent_module = MagicMock()
++        mock_agent_module.execute.return_value = {"test_result": "success"}
++        mock_import.return_value = mock_agent_module
++        
++        
++        test_state = {
++            "fact_context": {},
++            "agent_id": "requirement_agent",
++            "step": 1
++        }
++        
++        
++        result = orchestrator._execute_agent("requirement_agent", test_state)
++        
++        
++        mock_import.assert_called_once_with("agents.requirement_agent", fromlist=['execute'])
++        
++        
++        mock_agent_module.execute.assert_called_once_with(test_state)
++        
++        assert result == {"test_result": "success"}
++    
++    @patch("runtime.orchestrator.__import__")
++    def test_execute_agent_handles_missing_module(self, mock_import, orchestrator):
++        """Test that _execute_agent handles missing agent module gracefully"""
++        
++        mock_import.side_effect = ImportError("Module not found")
++        
++        test_state = {
++            "fact_context": {},
++            "agent_id": "nonexistent_agent",
++            "step": 1
++        }
++        
++        result = orchestrator._execute_agent("nonexistent_agent", test_state)
++        
++        
++        assert result is None
++    
++    @patch("runtime.orchestrator.__import__")
++    def test_execute_agent_handles_missing_execute_function(self, mock_import, orchestrator):
++        """Test that _execute_agent handles missing execute function gracefully"""
++        
++        mock_agent_module = MagicMock()
++        mock_agent_module.execute.side_effect = AttributeError("No execute function")
++        mock_import.return_value = mock_agent_module
++        
++        test_state = {
++            "fact_context": {},
++            "agent_id": "requirement_agent",
++            "step": 1
++        }
++        
++        result = orchestrator._execute_agent("requirement_agent", test_state)
++        
++        
++        assert result is None
++    
++    def test_update_fact_graph_implements_incremental_changes(self, orchestrator):
++        """Test that _update_fact_graph implements incremental changes principle"""
++        
++        orchestrator.fact_graph = {
++            "existing_key": "existing_value",
++            "another_key": "another_value"
++        }
++        
++        
++        changes = {
++            "existing_key": "updated_value",  
++            "new_key": "new_value",          
++            "deleted_key": None              
++        }
++        
++        orchestrator._update_fact_graph(changes)
++        
++        
++        assert orchestrator.fact_graph["existing_key"] == "updated_value"
++        assert orchestrator.fact_graph["another_key"] == "another_value"
++        assert orchestrator.fact_graph["new_key"] == "new_value"
++        assert "deleted_key" not in orchestrator.fact_graph  # Not deleted, just ignored
++        
++        # Test with non-dict input
++        orchestrator._update_fact_graph("not a dict")
++        assert orchestrator.fact_graph["existing_key"] == "updated_value"  # Unchanged
++    
++    @patch("runtime.orchestrator.os.makedirs")
++    @patch("runtime.orchestrator.open", new_callable=unittest.mock.mock_open)
++    @patch("runtime.orchestrator.datetime")
++    def test_log_patch_creates_and_appends_to_patch_log(self, mock_datetime, mock_open, mock_makedirs, orchestrator, temp_pack_dir):
++        """Test that _log_patch creates log directory and appends to patch_log.jsonl"""
++        # Mock datetime to return a fixed value
++        mock_datetime.now.return_value = datetime(2026, 5, 14, 10, 30, 0)
++        
++        # Test patch data
++        changes = {"user_input": "Create a report", "output": "Report created"}
++        
++        # Call _log_patch
++        orchestrator._log_patch("requirement_agent", changes)
++        
++        # Verify log directory was created
++        log_dir = os.path.join(temp_pack_dir, "runtime", "logs")
++        mock_makedirs.assert_called_once_with(log_dir, exist_ok=True)
++        
++        # Verify the patch entry was written correctly
++        expected_entry = {
++            "agent_id": "requirement_agent",
++            "timestamp": "2026-05-14 10:30:00",
++            "changes": {"user_input": "Create a report", "output": "Report created"}
++        }
++        
++        # Verify the file was opened correctly
++        mock_open.assert_called_once_with(
++            os.path.join(log_dir, "patch_log.jsonl"), 
++            'a', 
++            encoding='utf-8'
++        )
++        
++        # Verify the JSON was written correctly
++        mock_open().write.assert_called_once_with(
++            json.dumps(expected_entry, ensure_ascii=False) + '\n'
++        )
++        
++        # Verify the patch was added to patch_log list
++        assert len(orchestrator.patch_log) == 1
++        assert orchestrator.patch_log[0] == expected_entry
++    
++    @patch("runtime.orchestrator.StateGraph")
++    @patch("runtime.orchestrator.StateGraph.compile")
++    def test_execute_runs_complete_pipeline(self, mock_compile, mock_stategraph, orchestrator):
++        """Test that execute method runs the complete pipeline with initial input"""
++        # Mock the compiled app
++        mock_app = MagicMock()
++        mock_app.invoke.return_value = {"final_result": "success"}
++        mock_compile.return_value = mock_app
++        
++        # Initial input
++        initial_input = {"user_request": "Create a report about AI", "domain": "ai"}
++        
++        # Call execute
++        result = orchestrator.execute(initial_input)
++        
++        # Verify fact_graph was updated with initial input
++        assert orchestrator.fact_graph["user_request"] == "Create a report about AI"
++        assert orchestrator.fact_graph["domain"] == "ai"
++        
++        # Verify app.invoke was called with initial input
++        mock_app.invoke.assert_called_once_with(initial_input)
++        
++        # Verify the result is returned
++        assert result == {"final_result": "success"}
+\ No newline at end of line

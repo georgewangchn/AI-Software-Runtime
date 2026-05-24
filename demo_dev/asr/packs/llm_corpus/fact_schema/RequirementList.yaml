@@ -1,0 +1,31 @@
+fact_type: RequirementList
+description: 需求列表
+agent: requirement_agent
+fields:
+  语料总规模TB:
+    type: number
+    description: 语料数据总规模（TB）
+    min: 10
+    max: 10000
+    required: true
+  语种数量:
+    type: integer
+    description: 覆盖语种数量
+    min: 1
+    required: true
+  是否需要智能标注:
+    type: boolean
+    description: 是否需要智能标注
+    required: true
+  是否需要价值对齐:
+    type: boolean
+    description: 是否需要价值对齐（RLHF）
+    required: true
+  是否需要安全合规:
+    type: boolean
+    description: 是否需要满足行业安全合规要求
+    required: true
+affects:
+  - HardwareSpec
+  - Budget
+  - Compliance
