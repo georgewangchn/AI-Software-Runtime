@@ -1,4 +1,0 @@
-goal: "Tree walker with correct recursion"
-features:
-  - name: find_value
-    description: "Search tree for target value without infinite recursion"

@@ -10,8 +10,7 @@ import os
 import subprocess
 from pathlib import Path
 
-OPENCODE_MODEL = os.environ.get("ASR_OPENCODE_MODEL", "local/qwen3-next-80b-a3b-instruct")
-OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "120"))
+OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "7200"))
 
 
 def _parse_session_id(stdout: str) -> str | None:
@@ -63,7 +62,6 @@ def _run_opencode(prompt: str, project_dir: Path, session_id: str | None = None,
                   timeout: int = OPENCODE_TIMEOUT) -> tuple[str, str | None, int, int, int]:
     cmd = [
         "opencode", "run",
-        "--model", OPENCODE_MODEL,
         "--dangerously-skip-permissions",
         "--format", "json",
         "--dir", str(project_dir),
@@ -76,6 +74,10 @@ def _run_opencode(prompt: str, project_dir: Path, session_id: str | None = None,
         cmd, capture_output=True, text=True, timeout=timeout,
         env={**os.environ, "CI": "true", "GIT_TERMINAL_PROMPT": "0"},
     )
+    if result.returncode != 0 and result.returncode != -15:
+        import sys
+        print(f"[opencode] exit={result.returncode} err={result.stderr[:200]}", file=sys.stderr)
+
     new_session_id = _parse_session_id(result.stdout)
     pt, ct, tt = _parse_tokens(result.stdout)
     text = _parse_text(result.stdout)
@@ -98,13 +100,29 @@ def opencode_diff(prompt: str, project_dir: Path, session_id: str | None = None,
         subprocess.run(["git", "commit", "-m", "asr_init", "--allow-empty"],
                        cwd=str(project_dir), capture_output=True, timeout=10)
 
-    subprocess.run(["git", "add", "-A"], cwd=str(project_dir),
-                   capture_output=True, timeout=10)
+    add_result = subprocess.run(["git", "add", "-A"], cwd=str(project_dir),
+                   capture_output=True, text=True, timeout=10)
+    if add_result.returncode != 0:
+        import sys
+        print(f"[opencode_diff] git add failed: {add_result.stderr[:200]}", file=sys.stderr)
+
     diff_result = subprocess.run(
         ["git", "diff", "--cached", "HEAD"],
         cwd=str(project_dir), capture_output=True, text=True, timeout=30,
     )
     diff_text = diff_result.stdout.strip()
+
+    if not diff_text:
+        head_count = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(project_dir), capture_output=True, text=True, timeout=10,
+        )
+        if int(head_count.stdout.strip() or "0") > 1:
+            diff_result = subprocess.run(
+                ["git", "diff", "HEAD~1", "HEAD"],
+                cwd=str(project_dir), capture_output=True, text=True, timeout=30,
+            )
+            diff_text = diff_result.stdout.strip()
 
     if diff_text:
         subprocess.run(["git", "commit", "-m", "opencode_changes"],

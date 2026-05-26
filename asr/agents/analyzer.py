@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,7 @@ class AnalysisReport:
     missing_features: list[str] = field(default_factory=list)
     logic_issues: list[str] = field(default_factory=list)
     constraint_violations: list[str] = field(default_factory=list)
+    high_severity_count: int = 0
 
 
 class AnalyzerAgent(BaseAgent):
@@ -36,7 +38,7 @@ class AnalyzerAgent(BaseAgent):
         if not self.validate_event(event):
             return []
         try:
-            if event.type in (EventType.SPEC_DIFF_FOUND, EventType.SPEC_ALIGNED):
+            if event.type == EventType.ANALYZE_REQUESTED:
                 return await self._handle_analysis_request(event)
         except Exception as e:
             return [ErrorOccurredEvent(
@@ -67,21 +69,22 @@ class AnalyzerAgent(BaseAgent):
             AnalyzerFeedbackEvent(
                 task_id=event.task_id, from_agent=AgentName.ANALYZER,
                 to_agent=AgentName.BUILDER,
-                payload={"findings": findings, "recommendation": "Fix the identified issues"},
+                payload={"findings": findings, "recommendation": "Fix the identified issues",
+                         "high_severity_count": report.high_severity_count},
             ),
         ]
 
     async def _analyze(self) -> AnalysisReport:
         prompt = (
-            "1. 读取 DESIGN.md 了解系统设计\n"
-            "2. 读取所有工程代码\n"
-            "3. 对比设计文档与实现代码，分析两者偏差（包括未实现的功能、逻辑问题、违反约束等情况）\n"
-            "4. 输出 YAML（不要 markdown 代码块）：\n"
+            "1. 读取 DESIGN.md 和所有 .py 代码文件\n"
+            "2. 对比设计文档与实现代码\n"
+            "3. 将分析结果写入 analysis.yaml 文件：\n"
             "   task_type: dev\n"
             "   missing_features: []\n"
             "   logic_issues: []\n"
             "   constraint_violations: []\n"
-            "5. 无问题时所有列表为空"
+            "4. 仅分析：缺失功能、逻辑错误、违反约束\n"
+            "5. 无问题时所有列表为空数组 []"
         )
 
         sandbox = self._project_dir / ".asr_sandbox" / "analyzer"
@@ -99,52 +102,69 @@ class AnalyzerAgent(BaseAgent):
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
 
+        pt = ct = tt = 0
         try:
-            text, pt, ct, tt = await opencode_completion(prompt, sandbox)
+            _, pt, ct, tt = await opencode_completion(prompt, sandbox)
+            yaml_file = sandbox / "analysis.yaml"
+            if yaml_file.exists():
+                text = yaml_file.read_text()
+            else:
+                text = ""
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
         log_token_usage("analyzer", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
 
         try:
-            # Parse YAML output
-            data = yaml.safe_load(text)
-            
-            # Validate structure
+            cleaned = text
+            m = re.search(r"```(?:yaml)?\s*\n(.*?)```", cleaned, re.DOTALL)
+            if m:
+                cleaned = m.group(1)
+            else:
+                for marker in ("task_type:", "missing_features:", "logic_issues:", "constraint_violations:"):
+                    idx = cleaned.find(marker)
+                    if idx > 0:
+                        cleaned = cleaned[idx:]
+                        break
+            data = yaml.safe_load(cleaned)
+
             if not isinstance(data, dict):
                 raise ValueError("Response is not a YAML dictionary")
-            
-            # Validate required fields and types
-            task_type = data.get("task_type", "bugfix")
-            if not isinstance(task_type, str):
-                raise ValueError("task_type must be a string")
-                
-            missing_features = data.get("missing_features", [])
-            if not isinstance(missing_features, list):
-                raise ValueError("missing_features must be a list")
-                
-            logic_issues = data.get("logic_issues", [])
-            if not isinstance(logic_issues, list):
-                raise ValueError("logic_issues must be a list")
-                
-            constraint_violations = data.get("constraint_violations", [])
-            if not isinstance(constraint_violations, list):
-                raise ValueError("constraint_violations must be a list")
-            
+
+            missing_features = self._extract_descriptions(data.get("missing_features", []))
+            logic_issues = self._extract_descriptions(data.get("logic_issues", []))
+            constraint_violations = self._extract_descriptions(data.get("constraint_violations", []))
+
+            high_count = 0
+            for items in [data.get("missing_features", []), data.get("logic_issues", []), data.get("constraint_violations", [])]:
+                for item in (items if isinstance(items, list) else []):
+                    if isinstance(item, dict) and item.get("severity") in ("critical", "high"):
+                        high_count += 1
+
             return AnalysisReport(
-                aligned=not any(data.get(k) for k in ("missing_features", "logic_issues", "constraint_violations")),
-                task_type=task_type,
+                aligned=not (missing_features or logic_issues or constraint_violations),
+                task_type=data.get("task_type", "bugfix"),
                 missing_features=missing_features,
                 logic_issues=logic_issues,
                 constraint_violations=constraint_violations,
+                high_severity_count=high_count,
             )
         except (yaml.YAMLError, ValueError, TypeError) as e:
-            # Log the raw response for debugging (in production, this would be a structured log)
-            # Return structured error response that matches the expected format
             return AnalysisReport(
-                aligned=False, 
+                aligned=False,
                 task_type="bugfix",
-                missing_features=[], 
-                logic_issues=[f"Analysis failed: unable to parse response - {str(e)}"], 
-                constraint_violations=[]
+                missing_features=[],
+                logic_issues=[f"Analysis failed: unable to parse response - {str(e)}"],
+                constraint_violations=[],
             )
+
+    def _extract_descriptions(self, items: list) -> list[str]:
+        result = []
+        for item in (items if isinstance(items, list) else []):
+            if isinstance(item, str):
+                result.append(item)
+            elif isinstance(item, dict):
+                desc = item.get("description", str(item))
+                sev = item.get("severity", "")
+                result.append(f"[{sev}] {desc}" if sev else desc)
+        return result

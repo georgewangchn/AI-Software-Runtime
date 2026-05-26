@@ -1,12 +1,20 @@
+#!/bin/bash
+# source venv/bin/activate
 
-source venv/bin/activate
-DEVDIR=/Users/siidt/Documents/siicode/asr/demo_dev
+DEVDIR=/app/dev/asr/demo_dev
+export ASR_OPENCODE_TIMEOUT="7200"
 
-cd /Users/siidt/Documents/siicode/asr
-# 1. 准备开发工作区（首次）
-rm -rf "$DEVDIR/asr" && mkdir -p "$DEVDIR/asr"
-cp "$DEVDIR/可研报告编译器设计方案 v4.0.md" "$DEVDIR/asr/DESIGN.md"
-# 2. 启动 ASR（Dev Mode，10 轮）
-rm -rf .runtime/
-python -m asr.cli.main run --project "$DEVDIR/asr" --max-iterations 5
-Dev Mode 下 BuilderAgent 独占 10 轮，跳过 Tester/Analyzer。普通模式去掉 ASR_DEV_MODE=1。
+cd /app/dev/asr
+
+# 准备开发工作区
+rm -rf ".runtime"
+rm -rf "$DEVDIR/asr2" && mkdir -p "$DEVDIR/asr2"
+cp "$DEVDIR/DESIGN.md" "$DEVDIR/asr/DESIGN.md"
+git init
+git add .
+git config user.name "siidt"
+git config user.email "1"
+git commit -m "init asr2 workspace"
+
+# 启动 ASR
+python -m asr.cli.main run --project "$DEVDIR/asr2" --max-iterations 10

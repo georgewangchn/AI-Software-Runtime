@@ -7,6 +7,7 @@ import click
 
 from asr.config.loader import load_config, create_default_config
 from asr.runtime import ASRRuntime
+from asr.agents.llm_tracker import get_agent_tokens
 
 
 @click.group()
@@ -42,11 +43,21 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
     async def _run():
         last = [0, 0, 0]
 
-        def progress(iteration, errors, phase, failed, errored):
+        def progress(iteration, errors, phase, failed, errored, detail=""):
             if iteration != last[0] or phase != last[2]:
                 icon = "❌" if (failed or errored) else "✅" if errors == 0 else "🔧"
-                label = {"TESTING": "Tester  ", "ANALYZING": "Analyzer", "REPAIRING": "Builder ", "GENERATING": "Generate"}.get(phase, phase)
-                click.echo(f"  [{iteration:>3}] {label}  errors={errors:>2}  {icon}")
+                label = {"TESTING": "Tester  ", "ANALYZING": "Analyzer", "BUILDING": "Builder ", "REPAIRING": "Builder ", "GENERATING": "Generate"}.get(phase, phase)
+                agent_key = {"TESTING": "tester", "ANALYZING": "analyzer", "BUILDING": "builder", "REPAIRING": "builder"}.get(phase, "")
+                line = f"  [{iteration:>3}] {label}  errors={errors:>2}  {icon}"
+                if agent_key:
+                    t = get_agent_tokens(agent_key)
+                    if t.get("calls", 0) > 0:
+                        inp = _fmt_tokens(t["prompt_tokens"])
+                        out = _fmt_tokens(t["completion_tokens"])
+                        line += f"  | tok: {inp}/{out}"
+                if detail:
+                    line += f"  | {detail}"
+                click.echo(line)
                 last[0] = iteration
                 last[1] = errors
                 last[2] = phase
@@ -134,6 +145,12 @@ def compare(project, spec, baseline):
     click.echo(f"Project: {project}")
     click.echo(f"Baseline: {baseline}")
     click.echo("Run 'python scripts/run_demo.py' for full demo comparison")
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1000:
+        return f"{n/1000:.1f}k"
+    return str(n)
 
 
 def _show_progress(result) -> None:

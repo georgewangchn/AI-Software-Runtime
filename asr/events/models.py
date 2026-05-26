@@ -17,10 +17,12 @@ class EventType(str, Enum):
     TEST_ERROR = "test_error"
     SPEC_DIFF_FOUND = "spec_diff_found"
     SPEC_ALIGNED = "spec_aligned"
+    PATCH_REQUESTED = "patch_requested"
     PATCH_GENERATED = "patch_generated"
     PATCH_APPLIED = "patch_applied"
     PATCH_FAILED = "patch_failed"
     PATCH_ROLLED_BACK = "patch_rolled_back"
+    ANALYZE_REQUESTED = "analyze_requested"
     ANALYZER_FEEDBACK = "analyzer_feedback"
     CONVERGENCE_ITERATION = "convergence_iteration"
     CONVERGED = "converged"
@@ -59,7 +61,7 @@ class TaskCreatedEvent(Event):
 class CodeGeneratedEvent(Event):
     type: EventType = EventType.CODE_GENERATED
     payload: dict[str, Any] = Field(default_factory=dict)
-    # payload keys: files_modified, diff_text
+    # payload keys: summary {files, added, removed, bypass_detected, risk_score}
 
 
 class TestStartedEvent(Event):
@@ -89,7 +91,13 @@ class TestErrorEvent(Event):
 class SpecDiffFoundEvent(Event):
     type: EventType = EventType.SPEC_DIFF_FOUND
     payload: dict[str, Any] = Field(default_factory=dict)
-    # payload keys: missing_features, logic_issues, constraint_violations
+    # payload keys: missing_features, logic_issues, constraint_violations (response)
+
+
+class AnalyzeRequestedEvent(Event):
+    type: EventType = EventType.ANALYZE_REQUESTED
+    payload: dict[str, Any] = Field(default_factory=dict)
+    # payload keys: project_path, test_summary (request)
 
 
 class SpecAlignedEvent(Event):
@@ -101,7 +109,13 @@ class SpecAlignedEvent(Event):
 class PatchGeneratedEvent(Event):
     type: EventType = EventType.PATCH_GENERATED
     payload: dict[str, Any] = Field(default_factory=dict)
-    # payload keys: file_path, diff_text, reason
+    # payload keys: summary, reason
+
+
+class PatchRequestedEvent(Event):
+    type: EventType = EventType.PATCH_REQUESTED
+    payload: dict[str, Any] = Field(default_factory=dict)
+    # payload keys: failures, feedback, project_path
 
 
 class PatchAppliedEvent(Event):
@@ -167,10 +181,12 @@ _EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.TEST_ERROR: TestErrorEvent,
     EventType.SPEC_DIFF_FOUND: SpecDiffFoundEvent,
     EventType.SPEC_ALIGNED: SpecAlignedEvent,
+    EventType.PATCH_REQUESTED: PatchRequestedEvent,
     EventType.PATCH_GENERATED: PatchGeneratedEvent,
     EventType.PATCH_APPLIED: PatchAppliedEvent,
     EventType.PATCH_FAILED: PatchFailedEvent,
     EventType.PATCH_ROLLED_BACK: PatchRolledBackEvent,
+    EventType.ANALYZE_REQUESTED: AnalyzeRequestedEvent,
     EventType.ANALYZER_FEEDBACK: AnalyzerFeedbackEvent,
     EventType.CONVERGENCE_ITERATION: ConvergenceIterationEvent,
     EventType.CONVERGED: ConvergedEvent,

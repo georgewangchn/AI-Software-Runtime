@@ -1,4 +1,0 @@
-goal: "JSON config loader with proper validation"
-features:
-  - name: validate_config
-    description: "Validate config has required port field with integer type. Missing port, null port, and non-integer port must all be rejected."

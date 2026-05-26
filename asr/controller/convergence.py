@@ -11,17 +11,17 @@ from asr.events.models import (
     Event,
     EventType,
     AgentName,
-    TaskCreatedEvent,
     TestStartedEvent,
     TestFailedEvent,
     TestPassedEvent,
     TestErrorEvent,
     SpecDiffFoundEvent,
     SpecAlignedEvent,
+    PatchRequestedEvent,
     PatchGeneratedEvent,
     PatchAppliedEvent,
     PatchFailedEvent,
-    PatchRolledBackEvent,
+    AnalyzeRequestedEvent,
     AnalyzerFeedbackEvent,
     ConvergedEvent,
     StuckEvent,
@@ -31,7 +31,7 @@ from asr.events.models import (
 from asr.events.store import EventStore
 from asr.spec.models import Specification
 from asr.agents.base import BaseAgent
-from asr.patch.diff import PatchEngine, PatchEntry
+from asr.patch.diff import PatchEntry
 from asr.logger import ASRLogger
 
 
@@ -73,7 +73,6 @@ class ASRController:
         self._analyzer = analyzer
         self._use_decoupled = use_decoupled_a2a
         self._logger = logger
-        self._patch_engine = PatchEngine()
         self._patch_history: list[PatchGeneratedEvent] = []
         self._rollback_entries: list[PatchEntry] = []
         self._patch_lineage: list[dict] = []
@@ -83,13 +82,6 @@ class ASRController:
         task_id = task_id or str(uuid.uuid4())
         iteration = 0
         result = ConvergenceResult(state=ConvergenceState.INIT)
-
-        task_event = TaskCreatedEvent(
-            task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
-            payload={"spec": spec.model_dump(), "project_path": str(self._project_dir),
-                     "max_iterations": self._config.convergence.max_iterations},
-        )
-        self._write_and_log(task_event, result)
 
         prev_failures: list[dict] = []
         prev_feedback: list[str] = []
@@ -102,32 +94,76 @@ class ASRController:
             repair_events = await self._repairing_phase(task_id, prev_failures, prev_feedback)
             result.events.extend(repair_events)
             if progress_callback:
-                progress_callback(iteration, 0, "BUILDING", False, False)
+                patches = sum(1 for e in repair_events if e.type == EventType.PATCH_APPLIED and e.payload.get("success"))
+                py_count = len(list(self._project_dir.rglob("*.py")))
+                total_lines = sum(len(f.read_text().split("\n")) for f in self._project_dir.rglob("*.py") if "__pycache__" not in str(f))
+                detail = f"patches={patches} files={py_count} lines={total_lines}"
+                if prev_failures:
+                    detail += f" fixing={len(prev_failures)}"
+                elif prev_feedback:
+                    detail += f" gaps={len(prev_feedback)}"
+                else:
+                    detail += " init"
+                progress_callback(iteration, 0, "BUILDING", False, False, detail)
 
             test_events = await self._testing_phase(task_id)
             result.events.extend(test_events)
 
             test_failed = any(e.type == EventType.TEST_FAILED for e in test_events)
-            test_error = any(e.type == EventType.TEST_ERROR for e in test_events)
+            test_error = any(e.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED) for e in test_events)
             after_count = _count_failures(test_events)
 
             if progress_callback:
-                progress_callback(iteration, after_count, "TESTING", test_failed, test_error)
+                total_tests = sum(e.payload.get("total", 0) for e in test_events if hasattr(e, 'payload'))
+                passed_tests = sum(e.payload.get("passed", 0) for e in test_events if hasattr(e, 'payload'))
+                failed_names = []
+                for e in test_events:
+                    if e.type == EventType.TEST_FAILED:
+                        for f in e.payload.get("failures", [])[:3]:
+                            failed_names.append(f.get("nodeid", "?").split("::")[-1][:30])
+                detail = f"passed={passed_tests}/{total_tests}"
+                if failed_names:
+                    detail += f" fail={','.join(failed_names)}"
+                progress_callback(iteration, after_count, "TESTING", test_failed, test_error, detail)
 
-            if before_count > 0 and after_count > before_count and self._rollback_entries:
-                self._patch_engine.rollback(self._rollback_entries)
-                self._rollback_entries.clear()
+            if after_count > before_count and self._rollback_entries:
+                snapshotted = {e.file_path for e in self._rollback_entries}
+                for entry in reversed(self._rollback_entries):
+                    target = self._project_dir / entry.file_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(entry.original_content)
+                for py_file in self._project_dir.rglob("*.py"):
+                    if "test_" in py_file.name or "__pycache__" in str(py_file):
+                        continue
+                    rel = str(py_file.relative_to(self._project_dir))
+                    if rel not in snapshotted:
+                        py_file.unlink(missing_ok=True)
+            self._rollback_entries.clear()
             before_count = after_count
 
             if test_error:
                 test_failed = True
 
-            analysis_events = await self._analyzing_phase(task_id, test_events)
-            result.events.extend(analysis_events)
-
-            spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
-            if progress_callback:
-                progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned)
+            if not test_failed and not test_error:
+                analysis_events = await self._analyzing_phase(task_id, test_events)
+                result.events.extend(analysis_events)
+                spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
+                if progress_callback:
+                    gap_details = []
+                    for e in analysis_events:
+                        if e.type == EventType.ANALYZER_FEEDBACK:
+                            gap_details.extend(e.payload.get("findings", [])[:2])
+                        elif e.type == EventType.SPEC_DIFF_FOUND:
+                            for k in ("missing_features", "logic_issues", "constraint_violations"):
+                                items = e.payload.get(k, [])[:1]
+                                gap_details.extend(items)
+                    detail = "aligned" if spec_aligned else f"gaps={len(gap_details)}"
+                    if gap_details:
+                        detail += f" {gap_details[0][:40]}"
+                    progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned, detail)
+            else:
+                analysis_events = []
+                spec_aligned = False
             if not test_failed and not test_error and spec_aligned:
                 self._emit_converged(task_id, iteration, result)
                 return result
@@ -172,7 +208,7 @@ class ASRController:
     async def _analyzing_phase(self, task_id: str, test_events: list[Event]) -> list[Event]:
         events: list[Event] = []
         test_summary = self._extract_test_summary(test_events)
-        spec_diff = SpecDiffFoundEvent(
+        spec_diff = AnalyzeRequestedEvent(
             task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.ANALYZER,
             payload={"project_path": str(self._project_dir), "test_summary": test_summary},
         )
@@ -196,8 +232,19 @@ class ASRController:
     ) -> list[Event]:
         events: list[Event] = []
 
-        if self._builder and (failures or feedback):
-            patch_request = PatchGeneratedEvent(
+        if self._builder:
+            for py_file in self._project_dir.rglob("*.py"):
+                if "test_" not in py_file.name and "__pycache__" not in str(py_file):
+                    try:
+                        content = py_file.read_text()
+                    except Exception:
+                        continue
+                    self._rollback_entries.append(PatchEntry(
+                        file_path=str(py_file.relative_to(self._project_dir)),
+                        diff_text="", original_content=content,
+                    ))
+
+            patch_request = PatchRequestedEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
                 payload={"failures": failures, "feedback": feedback, "project_path": str(self._project_dir)},
             )
@@ -205,64 +252,20 @@ class ASRController:
             for evt in result_events:
                 events.append(evt)
                 if evt.type == EventType.PATCH_GENERATED:
-                    has_failures = bool(evt.payload.get("failures") if isinstance(evt.payload, dict) else False)
-                    if has_failures:
-                        self._patch_history.append(evt)
-                    diff_text = evt.payload.get("diff_text", "")
-                    file_path = evt.payload.get("file_path", "")
-                    if diff_text:
-                        original = self._read_file_safe(file_path)
-                        if original is not None:
-                            result = self._patch_engine.apply_single(diff_text, original)
-                        else:
-                            result = self._patch_engine.apply_single(diff_text, "")
-                            file_path = file_path or "main.py"
+                    summary = evt.payload.get("summary", {})
+                    if summary.get("files", 0) > 0:
                         applied = PatchAppliedEvent(
                             task_id=task_id, from_agent=AgentName.BUILDER,
                             to_agent=AgentName.CONTROLLER,
-                            payload={"file_path": file_path, "success": result.success,
-                                     "error": result.error if not result.success else None},
+                            payload={"file_path": "", "success": True, "error": None},
                         )
                         self._event_store.write_event(applied)
                         events.append(applied)
-                        if result.success and result.content:
-                            target = self._resolve_target(file_path)
-                            if target and "test_" not in file_path:
-                                if original:
-                                    self._rollback_entries.append(PatchEntry(
-                                        file_path=file_path, diff_text=diff_text,
-                                        original_content=original,
-                                    ))
-                                target.parent.mkdir(parents=True, exist_ok=True)
-                                target.write_text(result.content)
-
-                        if result.success:
-                            risk = self._compute_risk(diff_text)
-                            self._patch_lineage.append({
-                                "seq": len(self._patch_lineage) + 1,
-                                "file": file_path, "risk": risk,
-                            })
-            if self._use_decoupled and not events:
-                await asyncio.sleep(0.1)
-                for evt in self._event_store.get_task_events(task_id):
-                    if evt.type in (EventType.PATCH_APPLIED, EventType.PATCH_FAILED, EventType.PATCH_GENERATED):
-                        if evt.event_id not in {e.event_id for e in events}:
-                            events.append(evt)
-            return events
-
-        if failures:
-            patch_event = PatchGeneratedEvent(
-                task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
-                payload={"failures": failures, "project_path": str(self._project_dir)},
-            )
-            self._event_store.write_event(patch_event)
-            events.append(patch_event)
-            self._patch_history.append(patch_event)
-        await asyncio.sleep(0.1)
-        for evt in self._event_store.get_task_events(task_id):
-            if evt.type in (EventType.PATCH_APPLIED, EventType.PATCH_FAILED, EventType.PATCH_GENERATED):
-                if evt.event_id not in {e.event_id for e in events}:
-                    events.append(evt)
+                    self._patch_history.append(evt)
+                    self._patch_lineage.append({
+                        "seq": len(self._patch_lineage) + 1,
+                        "file": "*", "risk": summary,
+                    })
         return events
 
     async def _invoke_agent(
@@ -341,44 +344,8 @@ class ASRController:
         result.state = ConvergenceState.STUCK
         result.summary["lineage"] = self.lineage_summary()
 
-    def _compute_risk(self, diff_text: str) -> dict:
-        lines = diff_text.split("\n")
-        added = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
-        removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
-        files_touched = max(1, len([l for l in lines if l.startswith("--- a/")]) )
-
-        bypass_detected = any(p in diff_text for p in [
-            "except:", "pass", "if DEBUG:", "return expected",
-            "mock(", "@pytest.mark.skip",
-        ])
-
-        score = min(100, added * 2 + removed * 3 + files_touched * 10 + (25 if bypass_detected else 0))
-        return {
-            "score": score,
-            "lines_added": added, "lines_removed": removed,
-            "files_touched": files_touched,
-            "bypass_detected": bypass_detected,
-        }
-
     def lineage_summary(self) -> list[dict]:
         return list(self._patch_lineage)
-
-    def _detect_stable_diff(self) -> bool:
-        threshold = self._config.convergence.stable_diff_threshold
-        if len(self._patch_history) < threshold:
-            return False
-        diffs = [p.payload.get("diff_text", "") if isinstance(p.payload, dict) else ""
-                 for p in self._patch_history[-threshold:]]
-        return len(set(diffs)) == 1 and all(diffs)
-
-    def _detect_patch_oscillation(self) -> bool:
-        threshold = self._config.convergence.patch_oscillation_threshold
-        if len(self._patch_history) < threshold:
-            return False
-        diffs = [p.payload.get("diff_text", "") if isinstance(p.payload, dict) else ""
-                 for p in self._patch_history[-threshold:]]
-        unique = set(diffs)
-        return len(unique) == 2 and len(diffs) >= 3
 
 
 def _count_failures(events: list[Event]) -> int:
@@ -387,7 +354,7 @@ def _count_failures(events: list[Event]) -> int:
         if evt.type == EventType.TEST_FAILED:
             payload = evt.payload if isinstance(evt.payload, dict) else {}
             count += payload.get("failed", len(payload.get("failures", [])))
-        elif evt.type == EventType.TEST_ERROR:
+        elif evt.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED):
             count += 1
     return count
 

@@ -1,4 +1,0 @@
-goal: "String formatting utilities with correct truncation"
-features:
-  - name: truncate
-    description: "Truncate text with ellipsis, ensuring result length never exceeds max_len"

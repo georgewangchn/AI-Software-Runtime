@@ -1181,5 +1181,14 @@ provides:                                         # ★ v4.3
 20. **通用资产按名引用** ★ v4.3：commons Pack 资产通过 `{{ asset("base:diagrams/...") }}` 在模板中引用
 
 ---
+# LLM 接口参数：
+
+ 编译系统测试和运行可以通过调用一些模型进行：
+
+LLM_API_BASE==http://192.168.1.12:9988/v1
+LLM_API_KEY=empty
+LLM_MODEL=qwen3-next-80b-a3b-instruct
+LLM_CONTEXT=262144
+
 
 *本文档描述 v4.0 当前版本的架构设计与实现。历史版本变更请参见"零、版本历史"。*
