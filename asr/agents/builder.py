@@ -102,9 +102,9 @@ class BuilderAgent(BaseAgent):
                 for f in failures
             )
             base += f"修复以下测试失败：\n{failure_text}\n"
-        elif feedback:
+        if feedback:
             base += "修复以下偏差：\n" + "\n".join(f"- {fb}" for fb in feedback) + "\n"
-        else:
+        if not failures and not feedback:
             py_files = list(self._project_dir.rglob("*.py"))
             has_code = any("__pycache__" not in str(p) and "test_" not in p.name for p in py_files)
             if not has_code:

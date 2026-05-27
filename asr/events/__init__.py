@@ -19,7 +19,6 @@ from asr.events.models import (
     ConvergedEvent,
     StuckEvent,
     ErrorOccurredEvent,
-    MeshVerdictEvent,
     event_from_dict,
 )
 

@@ -1,3 +1,3 @@
-from asr.patch.diff import PatchEngine
+from asr.patch.diff import PatchEntry
 
-__all__ = ["PatchEngine"]
+__all__ = ["PatchEntry"]

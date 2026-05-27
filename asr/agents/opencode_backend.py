@@ -72,6 +72,7 @@ def _run_opencode(prompt: str, project_dir: Path, session_id: str | None = None,
 
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout,
+        stdin=subprocess.DEVNULL,
         env={**os.environ, "CI": "true", "GIT_TERMINAL_PROMPT": "0"},
     )
     if result.returncode != 0 and result.returncode != -15:

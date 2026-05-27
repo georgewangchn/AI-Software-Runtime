@@ -28,7 +28,6 @@ class EventType(str, Enum):
     CONVERGED = "converged"
     STUCK = "stuck"
     ERROR_OCCURRED = "error_occurred"
-    MESH_VERDICT = "mesh_verdict"
 
 
 class AgentName(str, Enum):
@@ -37,9 +36,6 @@ class AgentName(str, Enum):
     ANALYZER = "analyzer"
     CONTROLLER = "controller"
     SYSTEM = "system"
-    SECURITY = "security"
-    PERFORMANCE = "performance"
-    ARCHITECTURE = "architecture"
 
 
 class Event(BaseModel):
@@ -166,12 +162,6 @@ class ErrorOccurredEvent(Event):
     # payload keys: agent, error_type, error_message, retry_hint
 
 
-class MeshVerdictEvent(Event):
-    type: EventType = EventType.MESH_VERDICT
-    payload: dict[str, Any] = Field(default_factory=dict)
-    # payload keys: agent (security|performance|architecture), severity (high|medium|low), finding, passed
-
-
 _EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.TASK_CREATED: TaskCreatedEvent,
     EventType.CODE_GENERATED: CodeGeneratedEvent,
@@ -192,7 +182,6 @@ _EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.CONVERGED: ConvergedEvent,
     EventType.STUCK: StuckEvent,
     EventType.ERROR_OCCURRED: ErrorOccurredEvent,
-    EventType.MESH_VERDICT: MeshVerdictEvent,
 }
 
 

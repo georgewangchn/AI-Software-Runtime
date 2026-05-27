@@ -144,26 +144,22 @@ class ASRController:
             if test_error:
                 test_failed = True
 
-            if not test_failed and not test_error:
-                analysis_events = await self._analyzing_phase(task_id, test_events)
-                result.events.extend(analysis_events)
-                spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
-                if progress_callback:
-                    gap_details = []
-                    for e in analysis_events:
-                        if e.type == EventType.ANALYZER_FEEDBACK:
-                            gap_details.extend(e.payload.get("findings", [])[:2])
-                        elif e.type == EventType.SPEC_DIFF_FOUND:
-                            for k in ("missing_features", "logic_issues", "constraint_violations"):
-                                items = e.payload.get(k, [])[:1]
-                                gap_details.extend(items)
-                    detail = "aligned" if spec_aligned else f"gaps={len(gap_details)}"
-                    if gap_details:
-                        detail += f" {gap_details[0][:40]}"
-                    progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned, detail)
-            else:
-                analysis_events = []
-                spec_aligned = False
+            analysis_events = await self._analyzing_phase(task_id, test_events)
+            result.events.extend(analysis_events)
+            spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
+            if progress_callback:
+                gap_details = []
+                for e in analysis_events:
+                    if e.type == EventType.ANALYZER_FEEDBACK:
+                        gap_details.extend(e.payload.get("findings", [])[:2])
+                    elif e.type == EventType.SPEC_DIFF_FOUND:
+                        for k in ("missing_features", "logic_issues", "constraint_violations"):
+                            items = e.payload.get(k, [])[:1]
+                            gap_details.extend(items)
+                detail = "aligned" if spec_aligned else f"gaps={len(gap_details)}"
+                if gap_details:
+                    detail += f" {gap_details[0][:40]}"
+                progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned, detail)
             if not test_failed and not test_error and spec_aligned:
                 self._emit_converged(task_id, iteration, result)
                 return result
@@ -175,7 +171,25 @@ class ASRController:
             prev_feedback = []
             for evt in analysis_events:
                 if evt.type == EventType.ANALYZER_FEEDBACK:
-                    prev_feedback.extend(evt.payload.get("findings", []))
+                    findings = evt.payload.get("findings", [])
+                    prev_feedback.extend(findings)
+                    high_count = evt.payload.get("high_severity_count", 0)
+                    recommendation = evt.payload.get("recommendation", "")
+                    if high_count > 0:
+                        prev_feedback.insert(0, f"[PRIORITY] {high_count} high-severity issues — fix these first")
+                    if recommendation and recommendation != "Fix the identified issues":
+                        prev_feedback.insert(0, f"[STRATEGY] {recommendation}")
+            # 收集编译/Lint错误信息，避免 Builder 因缺乏反馈而死锁
+            for evt in test_events:
+                if evt.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED):
+                    error_msg = evt.payload.get("error_message", "")
+                    if error_msg:
+                        prev_feedback.append(f"[COMPILE_ERROR] {error_msg}")
+            for evt in analysis_events:
+                if evt.type == EventType.ERROR_OCCURRED:
+                    error_msg = evt.payload.get("error_message", "")
+                    if error_msg:
+                        prev_feedback.append(f"[ANALYZER_ERROR] {error_msg}")
 
             self._write_and_log(ConvergenceIterationEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.SYSTEM,

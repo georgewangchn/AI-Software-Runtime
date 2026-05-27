@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from asr.agents.base import BaseAgent
@@ -141,22 +142,35 @@ class TesterAgent(BaseAgent):
                          "failures": [{"nodeid": "no_code", "message": "No Python files to test"}]},
             )]
 
-        prompt = (
-            "1. 读取 DESIGN.md 了解系统设计\n"
-            "2. 读取所有工程代码\n"
-            "3. 生成 pytest 测试文件到 tests/ 目录\n"
-            "4. 回复末尾输出 ### DONE"
+        sandbox_tests = sandbox / "tests"
+        has_existing_tests = sandbox_tests.exists() and any(
+            f.suffix == ".py" for f in sandbox_tests.rglob("test_*.py")
         )
-        try:
-            _, pt, ct, tt = await opencode_completion(prompt, sandbox)
-            log_token_usage("tester", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
-        except Exception as e:
-            shutil.rmtree(sandbox, ignore_errors=True)
-            return [TestErrorEvent(
-                task_id=event.task_id, from_agent=AgentName.TESTER,
-                to_agent=AgentName.CONTROLLER,
-                payload={"error_message": f"opencode timeout/failure: {str(e)[:200]}", "exit_code": -1},
-            )]
+
+        if not has_existing_tests:
+            prompt = (
+                "1. 读取 DESIGN.md 了解系统设计\n"
+                "2. 读取所有工程代码\n"
+                "3. 生成 pytest 测试文件到 tests/ 目录\n"
+                "4. 回复末尾输出 ### DONE"
+            )
+            try:
+                _, pt, ct, tt = await opencode_completion(prompt, sandbox)
+                log_token_usage("tester", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
+            except Exception as e:
+                shutil.rmtree(sandbox, ignore_errors=True)
+                return [TestErrorEvent(
+                    task_id=event.task_id, from_agent=AgentName.TESTER,
+                    to_agent=AgentName.CONTROLLER,
+                    payload={"error_message": f"opencode timeout/failure: {str(e)}", "exit_code": -1},
+                )]
+
+        pip_req = sandbox / "requirements.txt"
+        if pip_req.exists():
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(pip_req), "-q"],
+                capture_output=True, text=True, timeout=300, cwd=str(sandbox),
+            )
 
         # Run pytest with text output (no --json-report dependency)
         try:
@@ -176,7 +190,7 @@ class TesterAgent(BaseAgent):
             return [TestErrorEvent(
                 task_id=event.task_id, from_agent=AgentName.TESTER,
                 to_agent=AgentName.CONTROLLER,
-                payload={"error_message": f"pytest invocation failed: {str(e)[:200]}", "exit_code": -1},
+                    payload={"error_message": f"pytest invocation failed: {str(e)}", "exit_code": -1},
             )]
 
         parsed = _parse_pytest_output(result.stdout)
@@ -195,11 +209,11 @@ class TesterAgent(BaseAgent):
             shutil.copytree(sandbox_tests, project_tests)
         shutil.rmtree(sandbox, ignore_errors=True)
 
-        if not total and result.returncode != 0:
+        if not total:
             return [TestErrorEvent(
                 task_id=event.task_id, from_agent=AgentName.TESTER,
                 to_agent=AgentName.CONTROLLER,
-                payload={"error_message": result.stderr[:200] or "pytest failed", "exit_code": result.returncode},
+                payload={"error_message": result.stderr or "No tests discovered", "exit_code": result.returncode},
             )]
 
         if failed > 0 or errors > 0:
