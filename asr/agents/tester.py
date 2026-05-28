@@ -142,35 +142,45 @@ class TesterAgent(BaseAgent):
                          "failures": [{"nodeid": "no_code", "message": "No Python files to test"}]},
             )]
 
-        sandbox_tests = sandbox / "tests"
-        has_existing_tests = sandbox_tests.exists() and any(
-            f.suffix == ".py" for f in sandbox_tests.rglob("test_*.py")
-        )
 
-        if not has_existing_tests:
-            prompt = (
-                "1. 读取 DESIGN.md 了解系统设计\n"
-                "2. 读取所有工程代码\n"
-                "3. 生成 pytest 测试文件到 tests/ 目录\n"
-                "4. 回复末尾输出 ### DONE"
-            )
-            try:
-                _, pt, ct, tt = await opencode_completion(prompt, sandbox)
-                log_token_usage("tester", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
-            except Exception as e:
-                shutil.rmtree(sandbox, ignore_errors=True)
-                return [TestErrorEvent(
-                    task_id=event.task_id, from_agent=AgentName.TESTER,
-                    to_agent=AgentName.CONTROLLER,
-                    payload={"error_message": f"opencode timeout/failure: {str(e)}", "exit_code": -1},
-                )]
+        prompt = (
+            '''编写专业的测试用例：
+            1. 读取 DESIGN.md 了解系统设计
+            2. 读取所有工程代码
+            3. 检查 tests/ 目录下已有的测试用例，如果有问题就修复
+            4. 对新功能或未覆盖的代码，补充新的 test_*.py 测试文件到 tests/ 目录
+            5. 确保每个 test_*.py 文件包含完整的 import 和测试函数'''
+        )
+        try:
+            text, pt, ct, tt = await opencode_completion(prompt, sandbox)
+            log_token_usage("tester", "opencode/qwen3-next-80b", {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
+        except Exception as e:
+            shutil.rmtree(sandbox, ignore_errors=True)
+            return [TestErrorEvent(
+                task_id=event.task_id, from_agent=AgentName.TESTER,
+                to_agent=AgentName.CONTROLLER,
+                payload={"error_message": f"opencode timeout/failure: {str(e)}", "exit_code": -1},
+            )]
+
+        sandbox_tests = sandbox / "tests"
+        test_files = list(sandbox_tests.rglob("test_*.py")) if sandbox_tests.exists() else []
+        if not test_files:
+            shutil.rmtree(sandbox, ignore_errors=True)
+            return [TestErrorEvent(
+                task_id=event.task_id, from_agent=AgentName.TESTER,
+                to_agent=AgentName.CONTROLLER,
+                payload={"error_message": f"opencode 未生成 test_*.py 文件，只有空目录。响应: {text[:300]}", "exit_code": -1},
+            )]
 
         pip_req = sandbox / "requirements.txt"
         if pip_req.exists():
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(pip_req), "-q"],
-                capture_output=True, text=True, timeout=300, cwd=str(sandbox),
-            )
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", str(pip_req), "-q", "--no-input"],
+                    capture_output=True, text=True, timeout=3600, cwd=str(sandbox),
+                )
+            except (subprocess.TimeoutExpired, Exception):
+                pass
 
         # Run pytest with text output (no --json-report dependency)
         try:

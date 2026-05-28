@@ -33,11 +33,11 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
     spec_path = Path(spec).resolve() if spec else None
     runtime = ASRRuntime(config)
 
-    mode = "decoupled A2A" if decoupled else "direct"
-    click.echo(f"ASR Runtime [{mode}]")
-    click.echo(f"Project: {project_dir}")
-    click.echo(f"Spec: {spec_path or '(from DESIGN.md)'}")
-    click.echo(f"Max iterations: {config.convergence.max_iterations}")
+    mode = "解耦A2A" if decoupled else "直接模式"
+    click.echo(f"ASR 收敛运行时 [{mode}]")
+    click.echo(f"项目路径: {project_dir}")
+    click.echo(f"规格文件: {spec_path or '(来自 DESIGN.md)'}")
+    click.echo(f"最大迭代轮次: {config.convergence.max_iterations}")
     click.echo()
 
     async def _run():
@@ -46,15 +46,15 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
         def progress(iteration, errors, phase, failed, errored, detail=""):
             if iteration != last[0] or phase != last[2]:
                 icon = "❌" if (failed or errored) else "✅" if errors == 0 else "🔧"
-                label = {"TESTING": "Tester  ", "ANALYZING": "Analyzer", "BUILDING": "Builder ", "REPAIRING": "Builder ", "GENERATING": "Generate"}.get(phase, phase)
+                label = {"TESTING": "测试验证", "ANALYZING": "规格分析", "BUILDING": "代码生成", "REPAIRING": "代码修复", "GENERATING": "初始生成"}.get(phase, phase)
                 agent_key = {"TESTING": "tester", "ANALYZING": "analyzer", "BUILDING": "builder", "REPAIRING": "builder"}.get(phase, "")
-                line = f"  [{iteration:>3}] {label}  errors={errors:>2}  {icon}"
+                line = f"  [第{iteration}轮] {label}  错误:{errors}  {icon}"
                 if agent_key:
                     t = get_agent_tokens(agent_key)
                     if t.get("calls", 0) > 0:
                         inp = _fmt_tokens(t["prompt_tokens"])
                         out = _fmt_tokens(t["completion_tokens"])
-                        line += f"  | tok: {inp}/{out}"
+                        line += f"  | Token:{inp}/{out}"
                 if detail:
                     line += f"  | {detail}"
                 click.echo(line)
@@ -79,13 +79,13 @@ def run(project, spec, config_path, max_iterations, decoupled, verbose):
         _show_progress(result)
         click.echo()
         if result.state == ConvergenceState.CONVERGED:
-            click.echo("✅ CONVERGED")
+            click.echo("✅ 已收敛 — 所有测试通过且规格一致")
         else:
             reason = result.events[-1].payload.get("reason", "unknown") if result.events else "unknown"
-            click.echo(f"❌ STUCK — {reason}")
-        click.echo(f"Iterations: {result.iterations} | Events: {len(result.events)}")
+            click.echo(f"❌ 卡住 — {reason}")
+        click.echo(f"迭代轮次: {result.iterations} | 事件数: {len(result.events)}")
         click.echo(f"\n📁 详细日志: .runtime/logs/asr.log")
-        click.echo(f"📁 LLM 追踪: .runtime/logs/llm.log")
+        click.echo(f"📁 LLM 追踪: .runtime/logs/llm.jsonl")
 
 
 @cli.command(name="run-dag")

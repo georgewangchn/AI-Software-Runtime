@@ -45,7 +45,8 @@ class AnalyzerAgent(BaseAgent):
         return []
 
     async def _handle_analysis_request(self, event: Event) -> list[Event]:
-        report = await self._analyze()
+        test_summary = event.payload.get("test_summary", {})
+        report = await self._analyze(test_summary)
         if report.aligned:
             return [SpecAlignedEvent(
                 task_id=event.task_id, from_agent=AgentName.ANALYZER,
@@ -69,18 +70,36 @@ class AnalyzerAgent(BaseAgent):
             ),
         ]
 
-    async def _analyze(self) -> AnalysisReport:
+    async def _analyze(self, test_summary: dict | None = None) -> AnalysisReport:
+        test_info = ""
+        if test_summary:
+            total = test_summary.get("total", 0)
+            passed = test_summary.get("passed", 0)
+            failed = test_summary.get("failed", 0)
+            failures = test_summary.get("failures", [])
+            if total > 0:
+                test_info = f"\n测试结果：共{total}个测试，通过{passed}个，失败{failed}个。\n"
+                if failures:
+                    test_info += "失败测试：\n" + "\n".join(
+                        f"  - {f.get('nodeid', '?')}: {f.get('message', '?')}"
+                        for f in failures[:5]
+                    ) + "\n"
+            elif total == 0 and passed == 0:
+                test_info = "\n注意：当前没有任何测试通过，项目可能无法编译或缺少测试文件。\n"
+
         prompt = (
-            "1. 读取 DESIGN.md 和所有 .py 代码文件\n"
-            "2. 对比设计文档与实现代码\n"
-            "3. 按以下分类输出分析结果，使用清晰的小标题和项目符号：\n"
+            test_info +
+            "1. 读取 DESIGN.md 了解系统设计\n"
+            "2. 分析系统代码\n"
+            "3. 对比设计文档与实现代码，重点关注测试失败对应的功能模块\n"
+            "4. 按以下分类输出分析结果，使用清晰的小标题和项目符号：\n"
             "   - 缺失功能：DESIGN.md 要求但未实现的功能\n"
             "   - 逻辑错误：实现方式与设计文档不符\n"
             "   - 违反约束：不符合 DESIGN.md 规定的约束条件\n"
             "   - 推演偏差：从第一性原理推演设计意图与实现不符\n"
-            "4. 每个问题标注严重程度 [HIGH]/[MEDIUM]/[LOW]\n"
-            "5. 如果实现完全符合设计文档，只输出 ALL CLEAR\n"
-            "6. 直接输出分析文本，不要写文件"
+            "5. 每个问题标注严重程度 [HIGH]/[MEDIUM]/[LOW]\n"
+            "6. 如果实现完全符合设计文档，只输出 ALL CLEAR\n"
+            "7. 直接输出分析文本，不要写文件"
         )
 
         sandbox = self._project_dir / ".asr_sandbox" / "analyzer"

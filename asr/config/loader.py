@@ -111,7 +111,9 @@ def create_default_config() -> ASRConfig:
             max_iterations=5,
             stable_diff_threshold=2,
             patch_oscillation_threshold=3,
-            test_timeout=120,
+            repair_timeout=14400,
+            test_timeout=14400,
+            analyze_timeout=14400,
         ),
         runtime=RuntimeConfig(),
     )

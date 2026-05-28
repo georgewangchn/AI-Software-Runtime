@@ -19,7 +19,14 @@ import yaml
 class ASRRuntime:
     def __init__(self, config: ASRConfig):
         self._config = config
-        self._event_store = EventStore(config.runtime.event_dir)
+        self._event_store = EventStore(
+            event_dir=config.runtime.event_dir,
+            inbox_dir=config.runtime.inbox_dir,
+            patches_dir=config.runtime.patch_dir,
+            diffs_dir=config.runtime.diff_dir,
+            state_dir=config.runtime.state_dir,
+            tasks_dir=config.runtime.task_dir,
+        )
 
     async def run(
         self, project_dir: Path, spec_path: Path | None = None, use_decoupled: bool = False,

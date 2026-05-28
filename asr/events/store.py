@@ -9,16 +9,23 @@ from asr.events.models import Event, EventType, AgentName, event_from_dict
 
 
 class EventStore:
-    def __init__(self, event_dir: str | Path = ".runtime/events"):
+    def __init__(self, event_dir: str | Path = ".runtime/events",
+                 inbox_dir: str | Path = ".runtime/inbox",
+                 patches_dir: str | Path = ".runtime/patches",
+                 diffs_dir: str | Path = ".runtime/diffs",
+                 state_dir: str | Path = ".runtime/state",
+                 tasks_dir: str | Path = ".runtime/tasks"):
         self._event_dir = Path(event_dir)
         self._event_dir.mkdir(parents=True, exist_ok=True)
-        self._patches_dir = Path(".runtime/patches")
+        self._inbox_dir = Path(inbox_dir)
+        self._inbox_dir.mkdir(parents=True, exist_ok=True)
+        self._patches_dir = Path(patches_dir)
         self._patches_dir.mkdir(parents=True, exist_ok=True)
-        self._diffs_dir = Path(".runtime/diffs")
+        self._diffs_dir = Path(diffs_dir)
         self._diffs_dir.mkdir(parents=True, exist_ok=True)
-        self._state_dir = Path(".runtime/state")
+        self._state_dir = Path(state_dir)
         self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._tasks_dir = Path(".runtime/tasks")
+        self._tasks_dir = Path(tasks_dir)
         self._tasks_dir.mkdir(parents=True, exist_ok=True)
 
     def write_event(self, event: Event) -> str:
@@ -42,7 +49,7 @@ class EventStore:
         return event_from_dict(data)
 
     def poll_inbox(self, agent: AgentName) -> list[Event]:
-        inbox_dir = Path(".runtime/inbox") / str(agent.value)
+        inbox_dir = self._inbox_dir / str(agent.value)
         if not inbox_dir.exists():
             return []
         events = []

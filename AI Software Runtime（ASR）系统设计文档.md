@@ -940,7 +940,7 @@ FEASIBILITY_LLM_MODEL=qwen3-next-80b-a3b-instruct
 FEASIBILITY_LLM_API_BASE=http://192.168.1.12:8000/v1
 FEASIBILITY_LLM_API_KEY=sk-123456
 ASR_OPENCODE_MODEL=local/qwen3-next-80b-a3b-instruct
-ASR_OPENCODE_TIMEOUT=7200
+ASR_OPENCODE_TIMEOUT=14400
 ```
 
 `create_default_config()` 从 .env 构建默认配置，无需手动编写 YAML。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -86,24 +87,28 @@ class ASRController:
         prev_failures: list[dict] = []
         prev_feedback: list[str] = []
         before_count = 0
+        prev_test_count = 0
 
         while iteration < self._config.convergence.max_iterations:
             iteration += 1
             result.iterations = iteration
 
-            repair_events = await self._repairing_phase(task_id, prev_failures, prev_feedback)
+            if iteration > 1 and not prev_failures and not prev_feedback:
+                repair_events = []
+            else:
+                repair_events = await self._repairing_phase(task_id, prev_failures, prev_feedback)
             result.events.extend(repair_events)
             if progress_callback:
                 patches = sum(1 for e in repair_events if e.type == EventType.PATCH_APPLIED and e.payload.get("success"))
                 py_count = len(list(self._project_dir.rglob("*.py")))
                 total_lines = sum(len(f.read_text().split("\n")) for f in self._project_dir.rglob("*.py") if "__pycache__" not in str(f))
-                detail = f"patches={patches} files={py_count} lines={total_lines}"
+                detail = f"补丁:{patches} 文件:{py_count} 代码行:{total_lines}"
                 if prev_failures:
-                    detail += f" fixing={len(prev_failures)}"
+                    detail += f" 修复{len(prev_failures)}个失败"
                 elif prev_feedback:
-                    detail += f" gaps={len(prev_feedback)}"
+                    detail += f" 偏差:{len(prev_feedback)}"
                 else:
-                    detail += " init"
+                    detail += " 初始生成"
                 progress_callback(iteration, 0, "BUILDING", False, False, detail)
 
             test_events = await self._testing_phase(task_id)
@@ -113,6 +118,11 @@ class ASRController:
             test_error = any(e.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED) for e in test_events)
             after_count = _count_failures(test_events)
 
+            current_test_count = sum(e.payload.get("total", 0) for e in test_events if hasattr(e, 'payload'))
+            if current_test_count != prev_test_count:
+                before_count = after_count
+                prev_test_count = current_test_count
+
             if progress_callback:
                 total_tests = sum(e.payload.get("total", 0) for e in test_events if hasattr(e, 'payload'))
                 passed_tests = sum(e.payload.get("passed", 0) for e in test_events if hasattr(e, 'payload'))
@@ -121,23 +131,25 @@ class ASRController:
                     if e.type == EventType.TEST_FAILED:
                         for f in e.payload.get("failures", [])[:3]:
                             failed_names.append(f.get("nodeid", "?").split("::")[-1][:30])
-                detail = f"passed={passed_tests}/{total_tests}"
+                detail = f"通过:{passed_tests}/{total_tests}"
                 if failed_names:
-                    detail += f" fail={','.join(failed_names)}"
+                    detail += f" 失败:{','.join(failed_names)}"
                 progress_callback(iteration, after_count, "TESTING", test_failed, test_error, detail)
 
-            if after_count > before_count and self._rollback_entries:
+            if before_count > 0 and after_count > before_count and after_count > before_count * 1.5 and self._rollback_entries:
                 snapshotted = {e.file_path for e in self._rollback_entries}
                 for entry in reversed(self._rollback_entries):
                     target = self._project_dir / entry.file_path
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(entry.original_content)
-                for py_file in self._project_dir.rglob("*.py"):
-                    if "test_" in py_file.name or "__pycache__" in str(py_file):
+                for f in self._project_dir.rglob("*"):
+                    if f.is_dir():
                         continue
-                    rel = str(py_file.relative_to(self._project_dir))
+                    if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")):
+                        continue
+                    rel = str(f.relative_to(self._project_dir))
                     if rel not in snapshotted:
-                        py_file.unlink(missing_ok=True)
+                        f.unlink(missing_ok=True)
             self._rollback_entries.clear()
             before_count = after_count
 
@@ -156,7 +168,7 @@ class ASRController:
                         for k in ("missing_features", "logic_issues", "constraint_violations"):
                             items = e.payload.get(k, [])[:1]
                             gap_details.extend(items)
-                detail = "aligned" if spec_aligned else f"gaps={len(gap_details)}"
+                detail = "规格一致" if spec_aligned else f"偏差:{len(gap_details)}"
                 if gap_details:
                     detail += f" {gap_details[0][:40]}"
                 progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned, detail)
@@ -167,29 +179,33 @@ class ASRController:
             prev_failures = []
             for evt in test_events:
                 if evt.type == EventType.TEST_FAILED:
-                    prev_failures.extend(evt.payload.get("failures", []))
-            prev_feedback = []
+                    for f in evt.payload.get("failures", []):
+                        if f.get("nodeid") != "no_code":
+                            prev_failures.append(f)
+            current_feedback = []
             for evt in analysis_events:
                 if evt.type == EventType.ANALYZER_FEEDBACK:
                     findings = evt.payload.get("findings", [])
-                    prev_feedback.extend(findings)
+                    current_feedback.extend(findings)
                     high_count = evt.payload.get("high_severity_count", 0)
                     recommendation = evt.payload.get("recommendation", "")
                     if high_count > 0:
-                        prev_feedback.insert(0, f"[PRIORITY] {high_count} high-severity issues — fix these first")
+                        current_feedback.insert(0, f"[PRIORITY] {high_count} high-severity issues — fix these first")
                     if recommendation and recommendation != "Fix the identified issues":
-                        prev_feedback.insert(0, f"[STRATEGY] {recommendation}")
-            # 收集编译/Lint错误信息，避免 Builder 因缺乏反馈而死锁
+                        current_feedback.insert(0, f"[STRATEGY] {recommendation}")
             for evt in test_events:
                 if evt.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED):
                     error_msg = evt.payload.get("error_message", "")
                     if error_msg:
-                        prev_feedback.append(f"[COMPILE_ERROR] {error_msg}")
+                        current_feedback.append(f"[COMPILE_ERROR] {error_msg}")
             for evt in analysis_events:
                 if evt.type == EventType.ERROR_OCCURRED:
                     error_msg = evt.payload.get("error_message", "")
                     if error_msg:
-                        prev_feedback.append(f"[ANALYZER_ERROR] {error_msg}")
+                        current_feedback.append(f"[ANALYZER_ERROR] {error_msg}")
+            if current_feedback:
+                current_feedback[-1] = f"{current_feedback[-1]} (迭代{iteration})"
+                prev_feedback = (prev_feedback + current_feedback)[-30:]
 
             self._write_and_log(ConvergenceIterationEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.SYSTEM,
@@ -213,10 +229,18 @@ class ASRController:
         self._event_store.write_event(test_started)
         events.append(test_started)
         await asyncio.sleep(0.1)
+        has_results = False
         for evt in self._event_store.get_task_events(task_id):
             if evt.type in (EventType.TEST_FAILED, EventType.TEST_PASSED, EventType.TEST_ERROR):
+                has_results = True
                 if evt.event_id not in {e.event_id for e in events}:
                     events.append(evt)
+        if not has_results:
+            events.append(TestErrorEvent(
+                task_id=task_id, from_agent=AgentName.TESTER,
+                to_agent=AgentName.CONTROLLER,
+                payload={"error_message": "No tester agent configured or no test results found", "exit_code": -1},
+            ))
         return events
 
     async def _analyzing_phase(self, task_id: str, test_events: list[Event]) -> list[Event]:
@@ -247,16 +271,20 @@ class ASRController:
         events: list[Event] = []
 
         if self._builder:
-            for py_file in self._project_dir.rglob("*.py"):
-                if "test_" not in py_file.name and "__pycache__" not in str(py_file):
-                    try:
-                        content = py_file.read_text()
-                    except Exception:
-                        continue
-                    self._rollback_entries.append(PatchEntry(
-                        file_path=str(py_file.relative_to(self._project_dir)),
-                        diff_text="", original_content=content,
-                    ))
+            skip_patterns = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")
+            for f in self._project_dir.rglob("*"):
+                if f.is_dir():
+                    continue
+                if any(p in str(f) for p in skip_patterns):
+                    continue
+                try:
+                    content = f.read_text()
+                except Exception:
+                    continue
+                self._rollback_entries.append(PatchEntry(
+                    file_path=str(f.relative_to(self._project_dir)),
+                    diff_text="", original_content=content,
+                ))
 
             patch_request = PatchRequestedEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
@@ -266,21 +294,68 @@ class ASRController:
             for evt in result_events:
                 events.append(evt)
                 if evt.type == EventType.PATCH_GENERATED:
-                    summary = evt.payload.get("summary", {})
-                    if summary.get("files", 0) > 0:
-                        applied = PatchAppliedEvent(
-                            task_id=task_id, from_agent=AgentName.BUILDER,
-                            to_agent=AgentName.CONTROLLER,
-                            payload={"file_path": "", "success": True, "error": None},
-                        )
-                        self._event_store.write_event(applied)
-                        events.append(applied)
                     self._patch_history.append(evt)
-                    self._patch_lineage.append({
-                        "seq": len(self._patch_lineage) + 1,
-                        "file": "*", "risk": summary,
-                    })
+
+            snapshotted = {e.file_path: e.original_content for e in self._rollback_entries}
+            changed = 0
+            combined_diff: list[str] = []
+
+            for entry in self._rollback_entries:
+                target = self._project_dir / entry.file_path
+                if not target.exists():
+                    continue
+                current = target.read_text()
+                if current == entry.original_content:
+                    continue
+                changed += 1
+                diff = list(difflib.unified_diff(
+                    entry.original_content.splitlines(keepends=True),
+                    current.splitlines(keepends=True),
+                    fromfile=f"a/{entry.file_path}",
+                    tofile=f"b/{entry.file_path}",
+                ))
+                combined_diff.extend(diff)
+
+            for f in self._project_dir.rglob("*"):
+                if f.is_dir():
+                    continue
+                if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")):
+                    continue
+                rel = str(f.relative_to(self._project_dir))
+                if rel not in snapshotted:
+                    changed += 1
+                    new_content = f.read_text()
+                    diff = list(difflib.unified_diff(
+                        [], new_content.splitlines(keepends=True),
+                        fromfile=f"a/{rel}",
+                        tofile=f"b/{rel}",
+                    ))
+                    combined_diff.extend(diff)
+
+            if changed > 0:
+                diff_text = "".join(combined_diff)
+                summary = _compute_diff_summary(diff_text)
+                applied = PatchAppliedEvent(
+                    task_id=task_id, from_agent=AgentName.BUILDER,
+                    to_agent=AgentName.CONTROLLER,
+                    payload={"file_path": "*", "success": True, "error": None},
+                )
+                self._event_store.write_event(applied)
+                events.append(applied)
+                if diff_text:
+                    self._event_store.save_patch(task_id, diff_text, "*")
+                self._patch_lineage.append({
+                    "seq": len(self._patch_lineage) + 1,
+                    "file": "*", "risk": summary,
+                })
         return events
+
+    _PHASE_TIMEOUT_MAP = {
+        "repairing": "repair_timeout",
+        "testing": "test_timeout",
+        "analyzing": "analyze_timeout",
+        "generating": "repair_timeout",
+    }
 
     async def _invoke_agent(
         self, agent: BaseAgent | None, event: Event, task_id: str, phase: str
@@ -296,7 +371,21 @@ class ASRController:
                     if evt.type in _EXPECTED_TYPES.get(phase, set()):
                         results.append(evt)
             return results
-        results = await agent.process(event)
+        timeout_attr = self._PHASE_TIMEOUT_MAP.get(phase, "test_timeout")
+        timeout = getattr(self._config.convergence, timeout_attr, 3600)
+        try:
+            results = await asyncio.wait_for(
+                agent.process(event),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return [ErrorOccurredEvent(
+                task_id=task_id, from_agent=agent.name,
+                to_agent=AgentName.CONTROLLER,
+                payload={"agent": str(agent.name.value), "error_type": "TimeoutError",
+                         "error_message": f"Agent {agent.name.value} timed out after {timeout}s",
+                         "retry_hint": "retryable"},
+            )]
         for evt in results:
             self._write_to_inbox(evt)
             self._event_store.write_event(evt)
@@ -331,7 +420,7 @@ class ASRController:
         result.events.append(event)
 
     def _write_to_inbox(self, event: Event) -> None:
-        inbox_dir = Path(".runtime/inbox") / str(event.to_agent.value)
+        inbox_dir = self._event_store._inbox_dir / str(event.to_agent.value)
         inbox_dir.mkdir(parents=True, exist_ok=True)
         event_path = inbox_dir / f"{event.event_id}.json"
         tmp_path = inbox_dir / f"{event.event_id}.tmp"
@@ -379,3 +468,24 @@ _EXPECTED_TYPES: dict[str, set[EventType]] = {
     "repairing": {EventType.PATCH_GENERATED, EventType.PATCH_APPLIED, EventType.PATCH_FAILED},
     "generating": {EventType.CODE_GENERATED},
 }
+
+
+def _compute_diff_summary(diff_text: str) -> dict:
+    if not diff_text:
+        return {"files": 0, "added": 0, "removed": 0, "bypass_detected": False, "risk_score": 0}
+    lines = diff_text.split("\n")
+    added = sum(1 for l in lines if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
+    files_touched = max(1, len([l for l in lines if l.startswith("--- a/") or l.startswith("+++ b/")]))
+    bypass_detected = any(p in diff_text for p in [
+        "except:", "pass", "if DEBUG:", "return expected",
+        "mock(", "@pytest.mark.skip",
+    ])
+    risk_score = min(100, added * 2 + removed * 3 + files_touched * 10 + (25 if bypass_detected else 0))
+    return {
+        "files": files_touched,
+        "added": added,
+        "removed": removed,
+        "bypass_detected": bypass_detected,
+        "risk_score": risk_score,
+    }

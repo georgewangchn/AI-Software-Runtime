@@ -1,6 +1,5 @@
 """
 OpenCode CLI backend — all ASR agents delegate to `opencode run`.
-BuilderAgent uses --continue for session memory.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "7200"))
+OPENCODE_TIMEOUT = int(os.environ.get("ASR_OPENCODE_TIMEOUT", "14400"))
 
 
 def _parse_session_id(stdout: str) -> str | None:
@@ -53,13 +52,20 @@ def _parse_text(stdout: str) -> str:
             data = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if data.get("type") == "text":
-            parts.append(data.get("part", {}).get("text", ""))
+        part = data.get("part", {})
+        if isinstance(part, dict):
+            text = part.get("text", "") or part.get("content", "")
+            if text:
+                parts.append(text)
+                continue
+        if isinstance(data.get("message"), dict):
+            text = data["message"].get("content", "")
+            if text:
+                parts.append(text)
     return "".join(parts)
 
 
-def _run_opencode(prompt: str, project_dir: Path, session_id: str | None = None,
-                  timeout: int = OPENCODE_TIMEOUT) -> tuple[str, str | None, int, int, int]:
+def _build_opencode_cmd(project_dir: Path, session_id: str | None = None) -> list[str]:
     cmd = [
         "opencode", "run",
         "--dangerously-skip-permissions",
@@ -68,70 +74,51 @@ def _run_opencode(prompt: str, project_dir: Path, session_id: str | None = None,
     ]
     if session_id:
         cmd.extend(["--session", session_id, "--continue"])
+    return cmd
+
+
+async def _run_opencode(prompt: str, project_dir: Path,
+                        session_id: str | None = None) -> tuple[str, str | None, int, int, int]:
+    cmd = _build_opencode_cmd(project_dir, session_id)
     cmd.append(prompt)
 
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout,
-        stdin=subprocess.DEVNULL,
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
         env={**os.environ, "CI": "true", "GIT_TERMINAL_PROMPT": "0"},
     )
-    if result.returncode != 0 and result.returncode != -15:
-        import sys
-        print(f"[opencode] exit={result.returncode} err={result.stderr[:200]}", file=sys.stderr)
+    try:
+        stdout_bytes, stderr_bytes = await proc.communicate()
+    except asyncio.CancelledError:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        raise
 
-    new_session_id = _parse_session_id(result.stdout)
-    pt, ct, tt = _parse_tokens(result.stdout)
-    text = _parse_text(result.stdout)
+    stdout_text = stdout_bytes.decode() if stdout_bytes else ""
+    stderr_text = stderr_bytes.decode() if stderr_bytes else ""
+
+    if proc.returncode and proc.returncode != -15:
+        import sys
+        print(f"[opencode] exit={proc.returncode} err={stderr_text[:200]}", file=sys.stderr)
+
+    new_session_id = _parse_session_id(stdout_text)
+    pt, ct, tt = _parse_tokens(stdout_text)
+    text = _parse_text(stdout_text)
     return text, new_session_id or session_id, pt, ct, tt
 
 
-async def opencode_completion(prompt: str, project_dir: Path,
-                              timeout: int = OPENCODE_TIMEOUT) -> tuple[str, int, int, int]:
-    text, _, pt, ct, tt = await asyncio.to_thread(_run_opencode, prompt, project_dir, None, timeout)
+async def opencode_completion(prompt: str, project_dir: Path) -> tuple[str, int, int, int]:
+    text, _, pt, ct, tt = await _run_opencode(prompt, project_dir)
     return text, pt, ct, tt
 
 
-def opencode_diff(prompt: str, project_dir: Path, session_id: str | None = None,
-                  timeout: int = OPENCODE_TIMEOUT) -> tuple[str, str | None, int, int, int]:
-    text, new_sid, pt, ct, tt = _run_opencode(prompt, project_dir, session_id, timeout)
-
-    if not (project_dir / ".git").exists():
-        subprocess.run(["git", "init"], cwd=str(project_dir), capture_output=True, timeout=10)
-        subprocess.run(["git", "add", "-A"], cwd=str(project_dir), capture_output=True, timeout=10)
-        subprocess.run(["git", "commit", "-m", "asr_init", "--allow-empty"],
-                       cwd=str(project_dir), capture_output=True, timeout=10)
-
-    add_result = subprocess.run(["git", "add", "-A"], cwd=str(project_dir),
-                   capture_output=True, text=True, timeout=10)
-    if add_result.returncode != 0:
-        import sys
-        print(f"[opencode_diff] git add failed: {add_result.stderr[:200]}", file=sys.stderr)
-
-    diff_result = subprocess.run(
-        ["git", "diff", "--cached", "HEAD"],
-        cwd=str(project_dir), capture_output=True, text=True, timeout=30,
-    )
-    diff_text = diff_result.stdout.strip()
-
-    if not diff_text:
-        head_count = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD"],
-            cwd=str(project_dir), capture_output=True, text=True, timeout=10,
-        )
-        if int(head_count.stdout.strip() or "0") > 1:
-            diff_result = subprocess.run(
-                ["git", "diff", "HEAD~1", "HEAD"],
-                cwd=str(project_dir), capture_output=True, text=True, timeout=30,
-            )
-            diff_text = diff_result.stdout.strip()
-
-    if diff_text:
-        subprocess.run(["git", "commit", "-m", "opencode_changes"],
-                       cwd=str(project_dir), capture_output=True, timeout=10)
-
-    return diff_text or "no changes", new_sid, pt, ct, tt
-
-
-async def opencode_diff_async(prompt: str, project_dir: Path, session_id: str | None = None,
-                              timeout: int = OPENCODE_TIMEOUT) -> tuple[str, str | None, int, int, int]:
-    return await asyncio.to_thread(opencode_diff, prompt, project_dir, session_id, timeout)
+async def opencode_run(prompt: str, project_dir: Path,
+                       session_id: str | None = None) -> tuple[str | None, int, int, int]:
+    _, new_sid, pt, ct, tt = await _run_opencode(prompt, project_dir, session_id)
+    return new_sid, pt, ct, tt
