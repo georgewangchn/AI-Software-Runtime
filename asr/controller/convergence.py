@@ -77,6 +77,7 @@ class ASRController:
         self._patch_history: list[PatchGeneratedEvent] = []
         self._rollback_entries: list[PatchEntry] = []
         self._patch_lineage: list[dict] = []
+        self._builder_counter = 0  # Counter for tracking builder invocations
 
     async def run(self, spec: Specification, task_id: str | None = None,
                   progress_callback=None) -> ConvergenceResult:
@@ -97,11 +98,21 @@ class ASRController:
                 repair_events = []
             else:
                 repair_events = await self._repairing_phase(task_id, prev_failures, prev_feedback)
+                # Increment builder counter when repair phase generates patches
+                if any(e.type == EventType.PATCH_GENERATED for e in repair_events):
+                    self._builder_counter += 1
             result.events.extend(repair_events)
             if progress_callback:
                 patches = sum(1 for e in repair_events if e.type == EventType.PATCH_APPLIED and e.payload.get("success"))
-                py_count = len(list(self._project_dir.rglob("*.py")))
-                total_lines = sum(len(f.read_text().split("\n")) for f in self._project_dir.rglob("*.py") if "__pycache__" not in str(f))
+                py_count = len([f for f in self._project_dir.rglob("*.py") if not any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".runtime", ".pytest_cache", ".git/", ".omo"))])
+                total_lines = 0
+                for f in self._project_dir.rglob("*.py"):
+                    if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".runtime", ".pytest_cache", ".git/", ".omo")):
+                        continue
+                    try:
+                        total_lines += len(f.read_text().split("\n"))
+                    except Exception:
+                        continue
                 detail = f"补丁:{patches} 文件:{py_count} 代码行:{total_lines}"
                 if prev_failures:
                     detail += f" 修复{len(prev_failures)}个失败"
@@ -156,9 +167,17 @@ class ASRController:
             if test_error:
                 test_failed = True
 
-            analysis_events = await self._analyzing_phase(task_id, test_events)
+            # Determine if we should force analyzer (periodic code review every 3 builder calls)
+            force_analyze = (self._builder_counter > 0 and self._builder_counter % 3 == 0)
+            analysis_events = await self._analyzing_phase(task_id, test_events, force_analyze)
             result.events.extend(analysis_events)
-            spec_aligned = any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
+            # spec_aligned only if there's a SPEC_ALIGNED event AND NO contradictory
+            # analyzer_feedback or spec_diff_found in the same round — otherwise it's
+            # a false positive (analyzer said ALL CLEAR while also reporting issues)
+            spec_aligned = (
+                any(e.type == EventType.SPEC_ALIGNED for e in analysis_events)
+                and not any(e.type in (EventType.ANALYZER_FEEDBACK, EventType.SPEC_DIFF_FOUND) for e in analysis_events)
+            )
             if progress_callback:
                 gap_details = []
                 for e in analysis_events:
@@ -173,8 +192,12 @@ class ASRController:
                     detail += f" {gap_details[0][:40]}"
                 progress_callback(iteration, after_count, "ANALYZING", False, not spec_aligned, detail)
             if not test_failed and not test_error and spec_aligned:
-                self._emit_converged(task_id, iteration, result)
-                return result
+                self._convergence_streak = getattr(self, '_convergence_streak', 0) + 1
+                if self._convergence_streak >= 3:  # require 3 consecutive aligned rounds
+                    self._emit_converged(task_id, iteration, result)
+                    return result
+            else:
+                self._convergence_streak = 0
 
             prev_failures = []
             for evt in test_events:
@@ -198,6 +221,28 @@ class ASRController:
                     error_msg = evt.payload.get("error_message", "")
                     if error_msg:
                         current_feedback.append(f"[COMPILE_ERROR] {error_msg}")
+            # Collect Builder errors from repair phase (e.g. fake-death detection)
+            builder_fakedeath = False
+            for evt in repair_events:
+                if evt.type == EventType.ERROR_OCCURRED:
+                    error_msg = evt.payload.get("error_message", "")
+                    retry_hint = evt.payload.get("retry_hint", "")
+                    if error_msg:
+                        tag = "[BUILDER_FAKEDEATH]" if retry_hint == "reset_session" else "[BUILDER_ERROR]"
+                        current_feedback.append(f"{tag} {error_msg}")
+                    if retry_hint == "reset_session":
+                        builder_fakedeath = True
+            # Fake-death: Builder made zero changes despite having failures/feedback.
+            # Force test_failed to prevent false convergence when tests happen to pass.
+            # Also inject a completeness check so the fresh Builder session knows to
+            # re-read DESIGN.md and verify all structures exist (not just fix tests).
+            if builder_fakedeath and (prev_failures or prev_feedback):
+                test_failed = True
+                current_feedback.append(
+                    "[COMPLETENESS] Builder session was reset due to context overflow. "
+                    "在新的会话中，首先重新读取 DESIGN.md，逐项检查所有描述的结构、文件、"
+                    "目录、Schema 是否都已完整创建——而不仅仅是修复测试失败。"
+                )
             for evt in analysis_events:
                 if evt.type == EventType.ERROR_OCCURRED:
                     error_msg = evt.payload.get("error_message", "")
@@ -243,14 +288,16 @@ class ASRController:
             ))
         return events
 
-    async def _analyzing_phase(self, task_id: str, test_events: list[Event]) -> list[Event]:
+    async def _analyzing_phase(self, task_id: str, test_events: list[Event], force_analyze: bool = False) -> list[Event]:
         events: list[Event] = []
         test_summary = self._extract_test_summary(test_events)
         spec_diff = AnalyzeRequestedEvent(
             task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.ANALYZER,
             payload={"project_path": str(self._project_dir), "test_summary": test_summary},
         )
-        if self._analyzer:
+        # Force analyzer to run every 3 builder invocations (periodic code review)
+        # or when there are test failures
+        if self._analyzer and (force_analyze or any(e.type == EventType.TEST_FAILED for e in test_events)):
             result_events = await self._invoke_agent(self._analyzer, spec_diff, task_id, "analyzing")
             if result_events:
                 events.extend(result_events)
@@ -269,6 +316,15 @@ class ASRController:
         self, task_id: str, failures: list[dict], feedback: list[str]
     ) -> list[Event]:
         events: list[Event] = []
+
+        # ── Diagnostic: snapshot project state before Builder runs ──
+        import sys as _sys
+        py_files_before = [f for f in self._project_dir.rglob("*.py")
+                           if not any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".runtime", ".pytest_cache", ".git/", ".omo"))]
+        py_dirs = sorted(set(f.parent.relative_to(self._project_dir) for f in py_files_before))
+        print(f"[convergence] REPAIRING iter={self._iteration_count if hasattr(self,'_iteration_count') else '?'} "
+              f"pre-Builder: {len(py_files_before)} py files in project={self._project_dir} "
+              f"top_dirs={[str(d) for d in py_dirs[:8]]}", file=_sys.stderr)
 
         if self._builder:
             skip_patterns = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")
@@ -324,7 +380,10 @@ class ASRController:
                 rel = str(f.relative_to(self._project_dir))
                 if rel not in snapshotted:
                     changed += 1
-                    new_content = f.read_text()
+                    try:
+                        new_content = f.read_text()
+                    except UnicodeDecodeError:
+                        continue  # skip binary files
                     diff = list(difflib.unified_diff(
                         [], new_content.splitlines(keepends=True),
                         fromfile=f"a/{rel}",

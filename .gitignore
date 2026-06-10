@@ -1,161 +1,98 @@
-# JetBrains PyCharm IDE
+# ============================================================
+# ASR — AI Software Runtime
+# .gitignore for open source release
+# ============================================================
+
+# ---- IDE & Editor ----
 .idea/
-# Byte-compiled / optimized / DLL files
+.vscode/
+*.iml
+
+# ---- Python ----
 *__pycache__*
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# macOS dir files
-.DS_Store
-
-# Distribution / packaging
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+*.egg
 *.egg-info/
 .installed.cfg
-*.egg
+.eggs/
+build/
+dist/
+sdist/
+develop-eggs/
+downloads/
+wheels/
+parts/
+var/
+lib/
+lib64/
 
-# Checkpoints
-checkpoints
+# ---- Virtual Environments ----
+.venv/
+venv/
+env/
+ENV/
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
+# ---- Testing & Coverage ----
 .tox/
 .coverage
 .coverage.*
-.cache
+htmlcov/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
 nosetests.xml
 coverage.xml
 *.cover
-.hypothesis/
 
-# Translations
-*.mo
-*.pot
+# ---- macOS ----
+.DS_Store
 
-# Django stuff:
+# ---- Logs & Temp ----
 *.log
-local_settings.py
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-.python-version
-
-# celery beat schedule file
+*.spec
+*.manifest
+pip-log.txt
+pip-delete-this-directory.txt
 celerybeat-schedule
 
-# SageMath parsed files
-*.sage.py
-
-# dotenv
+# ---- Environment / Secrets ----
+# .env 包含真实 API Key / 内网地址，不能提交
+# 请使用 .env.example 作为配置模板
 .env
+# 但 .env.example 是允许提交的（已脱敏）
+!.env.example
 
-# virtualenv
-.venv
-venv/
-ENV/
+# ---- ASR Runtime Generated Files ----
+# 运行时生成的目录（测试沙箱、事件日志等），不应提交
+.runtime/
+.asr_sandbox/
+.sisyphus/
+.workbuddy/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# ---- Python Version ----
+.python-version
 
-# Rope project settings
-.ropeproject
+# ---- Development / Private Data ----
+# demo_dev 是开发测试目录，包含私有测试案例
+demo_dev/
+# 比赛相关材料，不属于开源项目
+比赛*/
+*.zip
 
-# mkdocs documentation
+# ---- Docs build ----
+docs/_build/
 /site
 
-# mypy
-.mypy_cache/
-
-# Generated files
-
-#app
-*.zip
-*.log
-docker-compose-linux-x86_64
-doc_server/app/local_files/*
-sd_images.tar.filepart
-*_images.tar
+# ---- Misc ----
 *.bin
-.vscode
-*logs/
-data/
-test/
+checkpoints
 extracted_files/
 task/
+data/
 CLAUDE.md
-start_*_channel.sh
-start_*_main.sh
-venv/
-tests/
-example/
-doc/
-.workbuddy/
-projects/
-mvp/.checkpoints/
-mvp/.vscode/
-mvp/.idea/
-mvp/.pytest_cache/
-mvp/.mypy_cache/
-mvp/.coverage
-mvp/.tox/
-mvp/.eggs/
-mvp/.cache/
-mvp/.pytest_cache/
-mvp/.mypy_cache/
-mvp/.coverage
-mvp/.tox/
-mvp/.eggs/
-mvp/.cache/
-mvp/.pytest_cache
-examples2/
-venv/
-tests/
 llm_gateway/
-demo_project/
-.pytest_cache/
-.sisyphus/
-.runtime/
-demo_dev/
+Supervise-Agent*.docx

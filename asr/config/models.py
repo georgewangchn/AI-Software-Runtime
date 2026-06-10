@@ -26,9 +26,9 @@ class ConvergenceConfig(BaseModel):
     max_iterations: int = Field(default=10, ge=1)
     stable_diff_threshold: int = 2
     patch_oscillation_threshold: int = 3
-    repair_timeout: int = 14400
-    test_timeout: int = 14400
-    analyze_timeout: int = 14400
+    repair_timeout: int = 24400
+    test_timeout: int = 24400
+    analyze_timeout: int = 24400
 
 
 class RuntimeConfig(BaseModel):

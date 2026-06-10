@@ -42,11 +42,27 @@ class BuilderAgent(BaseAgent):
 
     async def _generate_patch(self, task_id: str, failures: list[dict], feedback: list[str]) -> list[Event]:
         prompt = self._build_patch_prompt(failures, feedback)
-        sid, pt, ct, tt = await opencode_run(prompt, self._project_dir, self._opencode_session_id)
-        log_token_usage("builder", "opencode/qwen3-next-80b",
+        sid, pt, ct, tt = await opencode_run(prompt, self._project_dir, self._opencode_session_id, label="Builder")
+        log_token_usage("builder", "opencode/glm-4.7-fp8",
                         {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
         if sid:
             self._opencode_session_id = sid
+
+        # Fake-death detection: opencode produced no output at all
+        if pt == 0 and ct == 0:
+            # Reset session to avoid cascading failure
+            self._opencode_session_id = None
+            return [ErrorOccurredEvent(
+                task_id=task_id, from_agent=AgentName.BUILDER,
+                to_agent=AgentName.CONTROLLER,
+                payload={
+                    "agent": "builder",
+                    "error_type": "FakeDeathError",
+                    "error_message": "opencode returned prompt_tokens=0 and completion_tokens=0 — session context likely too large, no code was generated",
+                    "retry_hint": "reset_session",
+                },
+            )]
+
         return [PatchGeneratedEvent(
             task_id=task_id, from_agent=AgentName.BUILDER,
             to_agent=AgentName.CONTROLLER,
@@ -58,17 +74,21 @@ class BuilderAgent(BaseAgent):
     def _build_task_prompt(self) -> str:
         return (
             '''根据设计文档 DESIGN.md 完成系统开发。
-            1. 读取 DESIGN.md，理解全部功能需求和系统架构；
+            1. 读取 DESIGN.md，理解全部需求：不仅是功能代码，还包括目录结构、配置文件、
+               Schema 定义、元数据等所有设计文档中描述的文件和目录；
             2. 逐模块完成开发，每个模块必须包含完整的功能代码和业务逻辑；
-            3. 不要创建空的 __init__.py 或骨架目录；
+            3. DESIGN.md 中列出的每个目录和文件都必须实际创建并有内容，
+               不要创建空的 __init__.py 或骨架目录——
+               如果 DESIGN.md 描述了一个文件，它必须存在且内容完整；
             4. 为每个模块编写基本的单元测试；
-            5. 开发完成前自检：对比 DESIGN.md，确认所有功能点都已实现
-            6. 如果有遗漏的功能模块，继续开发直到全部完成'''
+            5. 开发完成前自检：逐条对比 DESIGN.md，确认所有描述的结构、
+               文件、功能点都已实现，没有遗漏；
+            6. 如果有遗漏，继续开发直到全部完成
+            注意:整个开发过程请自动化执行，不要再中断询问我，若有多个方案选择，自主评估决定。'''
         )
 
     def _build_patch_prompt(self, failures: list[dict], feedback: list[str]) -> str:
-        base = "你是一个开发专家，和你配合的有测试专家、验收专家。开发流程是：开发专家开发代码 -> 测试专家编写测试用例 -> 验收专家验收结果 -> 反馈给开发专家。\n"
-        base += "你收到了测试专家和验收专家的反馈，请根据以下信息改进代码：\n"
+        base = "你收到了测试专家和验收专家的反馈，请根据以下信息改进代码：\n"
         if failures:
             failure_text = "\n".join(
                 f"- {f.get('nodeid', 'unknown')}: {f.get('message', 'no message')}"
@@ -78,7 +98,7 @@ class BuilderAgent(BaseAgent):
         if feedback:
             base += "\n验收专家发现的问题：\n\n"
             for fb in feedback:
-                if fb.startswith("[PRIORITY]") or fb.startswith("[COMPILE_ERROR]") or fb.startswith("[ANALYZER_ERROR]"):
+                if fb.startswith("[PRIORITY]") or fb.startswith("[COMPILE_ERROR]") or fb.startswith("[ANALYZER_ERROR]") or fb.startswith("[BUILDER_FAKEDEATH]") or fb.startswith("[BUILDER_ERROR]"):
                     base += f"**{fb}**\n\n"
                 else:
                     base += fb + "\n"
@@ -92,7 +112,7 @@ class BuilderAgent(BaseAgent):
             opts = [
                 "评分 1-10 并改进代码",
                 "从第一性原理优化不合理之处",
-                "对照 DESIGN.md 补全遗漏功能",
+                "逐条对比 DESIGN.md，检查所有文件、目录、配置、Schema 是否完整创建——补全一切遗漏",
                 "重构提升代码质量",
                 "分析一遍最近几轮的改动，推演一遍设计意图，看看是否有不合理的地方并改进",
             ]

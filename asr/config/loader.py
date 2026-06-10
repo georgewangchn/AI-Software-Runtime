@@ -60,8 +60,8 @@ def create_default_config() -> ASRConfig:
     if "/" not in model_name:
         model_name = f"openai/{model_name}"
 
-    api_base = dotenv.get("FEASIBILITY_LLM_API_BASE", "http://192.168.1.12:8000/v1")
-    api_key = dotenv.get("FEASIBILITY_LLM_API_KEY", "sk-123456")
+    api_base = dotenv.get("FEASIBILITY_LLM_API_BASE", "http://127.0.0.1:8000/v1")
+    api_key = dotenv.get("FEASIBILITY_LLM_API_KEY", "empty")
 
     glm_model = ModelConfig(
         model=model_name,
@@ -111,9 +111,9 @@ def create_default_config() -> ASRConfig:
             max_iterations=5,
             stable_diff_threshold=2,
             patch_oscillation_threshold=3,
-            repair_timeout=14400,
-            test_timeout=14400,
-            analyze_timeout=14400,
+            repair_timeout=24400,
+            test_timeout=24400,
+            analyze_timeout=24400,
         ),
         runtime=RuntimeConfig(),
     )
