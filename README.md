@@ -1,8 +1,10 @@
 # ASR — AI Software Runtime
 
+[![GitHub Pages](https://img.shields.io/badge/在线演示-GitHub%20Pages-blue)](https://georgewangchn.github.io/AI-Software-Runtime/)
+
 ASR（AI Software Runtime）是一个基于**多智能体协作**的自动化软件工程系统。通过 Builder → Tester → Analyzer 的闭环迭代，从设计文档（`DESIGN.md`）出发，自动生成完整的工程项目代码，并持续收敛直到测试全部通过。
 
-> **效果演示**: 查看 [系统效果验证测试报告](./系统效果验证测试报告.html)，对比 opencode CLI / ASR 初版 / ASR+ / longdoc 四种方案的实际生成效果。
+> **在线演示**: [georgewangchn.github.io/AI-Software-Runtime](https://georgewangchn.github.io/AI-Software-Runtime/) — 系统效果验证测试报告，对比四种方案的实际生成效果。
 
 ## 为什么开源
 
