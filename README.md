@@ -1,8 +1,9 @@
 # ASR — AI Software Runtime
 
 [![GitHub Pages](https://img.shields.io/badge/在线演示-GitHub%20Pages-blue)](https://georgewangchn.github.io/AI-Software-Runtime/)
+[![Version](https://img.shields.io/badge/version-2.0-green)](#)
 
-ASR（AI Software Runtime）是一个基于**多智能体协作**的自动化软件工程系统。通过 Builder → Tester → Analyzer 的闭环迭代，从设计文档（`DESIGN.md`）出发，自动生成完整的工程项目代码，并持续收敛直到测试全部通过。
+ASR（AI Software Runtime）是一个基于**控制论**的自治式 AI 软件工程收敛运行时。通过 Builder → Tester → Analyzer 的闭环迭代，从设计文档（`DESIGN.md`）出发，自动生成完整的工程项目代码，并持续收敛直到测试全部通过且规格对齐。
 
 > **在线演示**: [georgewangchn.github.io/AI-Software-Runtime](https://georgewangchn.github.io/AI-Software-Runtime/) — 系统效果验证测试报告，对比四种方案的实际生成效果。
 
@@ -32,25 +33,58 @@ ASR（AI Software Runtime）是一个基于**多智能体协作**的自动化软
 
 ---
 
+## 核心思想
+
+> **一个弱模型 + 强约束系统 > 一个强模型 + 无约束系统**
+
+ASR 的本质是一个**控制论系统**——把 LLM 当执行器（不可控、有随机性），用闭环反馈机制驱动它稳定收敛到目标状态：
+
+```
+目标（DESIGN.md）→ 控制器（ASRController）→ 执行器（Builder/LLM）→ 被控对象（代码）
+                                                                            ↓
+                                        反馈 ← 传感器（Tester pytest + Analyzer 语义）
+```
+
+**v2.0 控制论优化体系**（经六轮第一性原理推演验证）：
+
+| 控制论要求 | ASR 实现 |
+|-----------|---------|
+| **反馈信号可靠** | test_pass_rate 地面真值（pytest 客观结果），Analyzer 噪声信号降级为 logging-only |
+| **执行器可约束** | RepairMode 状态机（6 种模式）+ Patch 限幅 + Formal Guards（测试删除/语法检查/Bypass 检测） |
+| **系统稳定** | 振荡检测（三重指纹）+ Circuit Breaker + 退化回滚（_best_snapshot）+ Hysteresis 防抖 |
+| **可观测** | ConvergenceMetrics（15+ 字段）+ 全事件文件化存储 + 可回放 |
+| **可控制** | RepairMode 自动切换 + FINAL_VERIFICATION 防假收敛 + Failure Fingerprint |
+
+---
+
 ## 工作原理
 
 ```
 DESIGN.md（规格文档）
      │
      ▼
-┌─────────────────────────────────────────┐
-│              ASR 收敛运行时              │
-│                                         │
-│  Builder ──► Tester ──► Analyzer        │
-│     ▲                      │            │
-│     └──── 修复指令 ◄────────┘            │
-│                                         │
-│  迭代直到：所有测试通过 + 规格对齐        │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                ASR 收敛运行时                      │
+│                                                  │
+│  ① REPAIRING  →  ② TESTING  →  ③ ANALYZING      │
+│     Builder        Tester        Analyzer         │
+│     生成/修复       pytest验证     语义对比DESIGN    │
+│       ▲               │              │            │
+│       │          退化检测         对齐?            │
+│       │          _best_snapshot    ↓               │
+│       └── 修复指令 ←──┴──── CONVERGED              │
+│                                                  │
+│  ④ 控制论决策（每轮）                               │
+│     ConvergenceMetrics → trend/oscillation       │
+│     Circuit Breaker → 连续N轮无改善则停            │
+│     RepairMode auto-switch → hysteresis 切换      │
+└──────────────────────────────────────────────────┘
      │
      ▼
-完整工程项目（含测试、文档、Pack 元数据）
+完整工程项目（含测试、文档）
 ```
+
+---
 
 ## 环境要求
 
@@ -121,7 +155,7 @@ FEASIBILITY_LLM_CONTEXT=131072
 - 架构约束（分层设计、依赖关系）
 - 测试要求（单测覆盖率、集成测试）
 
-> **关于 DESIGN.md**：每个项目需要自己编写 DESIGN.md，描述待生成软件的规格。这是 ASR 的核心输入，决定了最终生成代码的功能和结构。你可以参考 [AI Software Runtime(ASR)技术报告](./AI%20Software%20runtime(ASR)技术报告.md) 中的案例了解规格文档的写法。
+> **关于 DESIGN.md**：每个项目需要自己编写 DESIGN.md，描述待生成软件的规格。这是 ASR 的核心输入，决定了最终生成代码的功能和结构。你可以参考 [AI Software Runtime(ASR)技术报告](./AI%20Software%20Runtime(ASR)技术报告.md) 中的案例了解规格文档的写法。
 
 ### 5. 运行 ASR
 
@@ -142,36 +176,62 @@ cp start.sh my_start.sh
 bash my_start.sh
 ```
 
+**运行时输出示例**：
+
+```
+ASR 收敛运行时 [直接模式]
+项目路径: my_project
+最大迭代轮次: 20
+
+  [第1轮] 代码生成  错误:0  🔧  | 补丁:0 文件:3 代码行:156 初始生成
+  [第2轮] 测试验证  错误:3  ❌  | 通过:12/15 失败:test_foo,test_bar
+  [第3轮] 代码修复  错误:3  🔧  | 修复3个失败 pass_rate=0.80 trend=improving
+  [第4轮] 测试验证  错误:0  ✅  | 通过:15/15
+  [第5轮] 规格分析  错误:0  ✅  | 规格:一致
+
+✅ 已收敛 — 所有测试通过且规格一致
+迭代轮次: 5 | 事件数: 23
+```
+
 ## 验证安装
 
 ```bash
 python -m asr.cli.main --help
 ```
 
+---
+
 ## 项目结构
 
 ```
 asr/
-├── asr/                        # ASR 核心代码
-│   ├── agents/                 # 智能体实现
-│   │   ├── builder.py          # Builder Agent：代码生成与修复
-│   │   ├── tester.py           # Tester Agent：pytest 执行与验证
-│   │   ├── analyzer.py         # Analyzer Agent：规格对齐分析
-│   │   └── opencode_backend.py # opencode CLI 调用后端
+├── asr/                            # ASR 核心代码
+│   ├── agents/                     # 智能体实现
+│   │   ├── builder.py              # Builder Agent：代码生成与修复（带会话延续）
+│   │   ├── tester.py               # Tester Agent：测试生成 + pytest 执行（Sandbox 隔离）
+│   │   ├── analyzer.py             # Analyzer Agent：diff-only 模式 + 结构化偏差分析
+│   │   ├── opencode_backend.py     # opencode CLI 子进程调用后端
+│   │   └── llm_tracker.py          # Token 消耗追踪
 │   ├── controller/
-│   │   └── convergence.py      # 收敛控制器：迭代循环与终止条件
+│   │   └── convergence.py          # 收敛控制器：控制论指标 + RepairMode 状态机 + 退化回滚（~1350行）
 │   ├── cli/
-│   │   └── main.py             # CLI 入口
-│   ├── config/                 # 配置加载（支持 .env）
-│   ├── events/                 # 事件总线
-│   ├── patch/                  # Diff/Patch 应用逻辑
-│   └── runtime.py              # 运行时入口
-├── .env.example                # 环境变量配置模板（复制为 .env 后填写）
-├── start.sh                    # 启动脚本示例
-├── requirements.txt            # Python 依赖
-├── index.html                  # 系统效果验证测试报告（GitHub Pages 首页）
+│   │   └── main.py                 # CLI 入口
+│   ├── config/
+│   │   ├── models.py               # Pydantic v2 配置模型（含控制论参数）
+│   │   └── loader.py               # 配置加载（支持 .env）
+│   ├── events/                     # 20 种事件类型 + EventStore（文件化 A2A 通信）
+│   ├── dag/                        # Task DAG 并行执行
+│   └── runtime.py                  # 运行时入口
+├── tests/                          # 单元测试
+├── demo_dev/                       # Demo 工程
+├── .env.example                    # 环境变量配置模板
+├── start.sh                        # 启动脚本示例
+├── requirements.txt                # Python 依赖
+├── index.html                      # 系统效果验证测试报告（GitHub Pages 首页）
 └── README.md
 ```
+
+---
 
 ## 环境变量说明
 
@@ -184,6 +244,8 @@ asr/
 | `ASR_OPENCODE_TIMEOUT` | 可选 | opencode 调用超时秒数（默认 24400） |
 | `ASR_VERBOSE` | 可选 | 设为 `1` 启用详细日志 |
 
+---
+
 ## 依赖说明
 
 | 包 | 用途 |
@@ -191,26 +253,71 @@ asr/
 | `pydantic` | 数据模型校验 |
 | `pyyaml` | YAML 配置解析 |
 | `litellm` | 统一 LLM 调用接口（支持 OpenAI / Anthropic 等） |
+| `openai` | OpenAI 兼容 API 客户端 |
+| `whatthepatch` | Diff/Patch 解析与应用 |
+| `filelock` | 文件锁（事件原子写入） |
 | `click` | CLI 框架 |
 | `rich` | 终端美化输出 |
 | `pytest` | 测试框架 |
+| `pytest-asyncio` | 异步测试支持 |
+| `pytest-json-report` | pytest JSON 报告 |
+| `pytest-cov` | 测试覆盖率 |
 | `fastapi` + `uvicorn` | Web API（可选） |
 | `httpx` | HTTP 客户端 |
+
+---
+
+## v2.0 控制论优化亮点
+
+### RepairMode 状态机
+
+六种修复模式，每种实质改变 Controller 对 Builder 的调用方式，通过 hysteresis 自动切换：
+
+```
+INITIAL_GENERATION → TEST_FIX ←────────────────────┐
+                       ↓ (stalled ≥ 2)              │
+                   SPEC_COMPLETION                   │
+                       ↓ (oscillation ≥ 0.7)        │
+                   OSCILLATION_BREAK ──(improving ≥ 2)──┘
+                       ↓ (regressing ≥ 2)
+                   REGRESSION_RECOVERY ──(improving ≥ 1)──→ TEST_FIX
+                       ↓ (tests pass, no analyzer)
+                   FINAL_VERIFICATION ──(Analyzer: ALL CLEAR)──→ 收敛
+```
+
+### Formal Guards（硬约束三件套）
+
+| Guard | 检测内容 | 动作 |
+|-------|---------|------|
+| 测试删除检测 | Builder 删除了 test_*.py 或 tests/ 下的文件 | 拒绝 patch + 回滚 |
+| 语法检查 | 对所有 .py 文件（含新建）执行 `ast.parse()` | 拒绝 patch + 回滚 |
+| Bypass 检测 | `except:`、`return expected`、`@pytest.mark.skip`、生产代码中的 `mock` | 拒绝 patch + 回滚 |
+
+### 退化回滚（_best_snapshot）
+
+test_pass_rate 创新高时保存项目文件快照，持续退化时恢复到最佳状态——不依赖 LLM 判断，纯文件级回滚。
+
+---
 
 ## 相关文档
 
 ### 项目演进
 
-ASR 的设计思路经历了两次迭代，展现了从原始构想到工程落地的完整思路：
+ASR 的设计思路经历了从原始构想到工程落地的完整演进：
 
 | 阶段 | 文档 | 说明 |
 |------|------|------|
 | 原始构想 | [Supervise-Agent：有监督长任务自动化软件工程系统.md](./Supervise-Agent：有监督长任务自动化软件工程系统.md) | 项目最初的想法：分层裁决 + 多Agent协同 + 工程约束，利用低成本开源模型实现接近高端模型的稳定性 |
-| 方案细化 | [AI Software Runtime(ASR)系统设计文档.md](./AI%20Software%20Runtime(ASR)系统设计文档.md) | 在原始构想基础上的完整工程设计方案，包含 DAG 调度、事件总线、收敛控制、Patch 管理等核心模块 |
+| 工程落地 + 控制论优化 | [AI Software Runtime(ASR)技术报告.md](./AI%20Software%20Runtime(ASR)技术报告.md) | 完整技术报告（v2.0），含系统架构设计、控制论优化体系、端到端验证、DAG 调度、事件总线、配置模型等 |
 
-> **阅读建议**：建议先读原始构想理解"为什么需要这个系统"，再读系统设计文档了解"怎么实现的"。
+> **阅读建议**：建议先读原始构想理解"为什么需要这个系统"，再读技术报告了解"怎么实现的 + 控制论怎么优化的"。
 
 ### 其他
 
-- [AI Software Runtime(ASR) 技术报告](./AI%20Software%20runtime(ASR)技术报告.md) — 系统架构与设计原理
 - [系统效果验证测试报告](./系统效果验证测试报告.html) — 对比测试结果与分析
+
+---
+
+## License
+
+MIT
