@@ -88,7 +88,8 @@ def _parse_text(stdout: str) -> str:
     return "".join(parts)
 
 
-def _build_opencode_cmd(project_dir: Path, session_id: str | None = None) -> list[str]:
+def _build_opencode_cmd(project_dir: Path, session_id: str | None = None,
+                        temperature: float | None = None) -> list[str]:
     cmd = [
         "opencode", "run",
         "--dangerously-skip-permissions",
@@ -97,13 +98,20 @@ def _build_opencode_cmd(project_dir: Path, session_id: str | None = None) -> lis
     ]
     if session_id:
         cmd.extend(["--session", session_id, "--continue"])
+    # NOTE: opencode 1.17.x does not support --temperature flag.
+    # Temperature control is handled via opencode's config or model variant.
+    # The temperature parameter is accepted by this function for API compatibility
+    # but silently ignored at the CLI level.
+    # if temperature is not None:
+    #     cmd.extend(["--temperature", str(temperature)])
     return cmd
 
 
 async def _run_opencode(prompt: str, project_dir: Path,
                         session_id: str | None = None,
-                        label: str = "") -> tuple[str, str | None, int, int, int]:
-    cmd = _build_opencode_cmd(project_dir, session_id)
+                        label: str = "",
+                        temperature: float | None = None) -> tuple[str, str | None, int, int, int]:
+    cmd = _build_opencode_cmd(project_dir, session_id, temperature)
     cmd.append(prompt)
 
     proc = await asyncio.create_subprocess_exec(
@@ -168,6 +176,7 @@ async def opencode_completion(prompt: str, project_dir: Path,
 
 async def opencode_run(prompt: str, project_dir: Path,
                        session_id: str | None = None,
-                       label: str = "") -> tuple[str | None, int, int, int]:
-    _, new_sid, pt, ct, tt = await _run_opencode(prompt, project_dir, session_id, label=label)
+                       label: str = "",
+                       temperature: float | None = None) -> tuple[str | None, int, int, int]:
+    _, new_sid, pt, ct, tt = await _run_opencode(prompt, project_dir, session_id, label=label, temperature=temperature)
     return new_sid, pt, ct, tt

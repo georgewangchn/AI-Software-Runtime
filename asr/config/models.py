@@ -29,6 +29,23 @@ class ConvergenceConfig(BaseModel):
     repair_timeout: int = 24400
     test_timeout: int = 24400
     analyze_timeout: int = 24400
+    # 显式控制指标权重（error_score 计算）
+    w_test_failed: float = 1.0
+    w_test_error: float = 2.0
+    w_missing_feature: float = 1.5
+    w_logic_issue: float = 1.0
+    w_constraint_violation: float = 0.8
+    w_high_severity: float = 2.0
+    w_patch_regression: float = 1.0
+    # Patch 限幅（Phase 3）
+    max_files_per_patch: int = 10
+    max_lines_per_patch: int = 200
+    max_deleted_lines_per_patch: int = 50
+    allow_large_patch_in_initial: bool = True
+    # 硬拒绝：patch 超标时要求 Builder 重做（而不仅仅是 prompt 提示）
+    hard_reject_oversized_patch: bool = True
+    # Circuit breaker：连续 N 轮 test_pass_rate 无改善则停止
+    circuit_breaker_stagnant_iters: int = 6
 
 
 class RuntimeConfig(BaseModel):

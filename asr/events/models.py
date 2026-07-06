@@ -28,6 +28,7 @@ class EventType(str, Enum):
     CONVERGED = "converged"
     STUCK = "stuck"
     ERROR_OCCURRED = "error_occurred"
+    CONVERGENCE_METRICS = "convergence_metrics"
 
 
 class AgentName(str, Enum):
@@ -162,6 +163,39 @@ class ErrorOccurredEvent(Event):
     # payload keys: agent, error_type, error_message, retry_hint
 
 
+class ConvergenceMetrics(BaseModel):
+    """显式控制指标：每一轮迭代的统一误差信号。"""
+    iteration: int = 0
+    # 硬约束信号
+    test_failed_count: int = 0
+    test_error_count: int = 0
+    # 语义信号
+    missing_feature_count: int = 0
+    logic_issue_count: int = 0
+    constraint_violation_count: int = 0
+    high_severity_count: int = 0
+    # patch 信号
+    patch_count: int = 0
+    changed_file_count: int = 0
+    changed_line_count: int = 0
+    # 稳定性信号
+    rollback_count: int = 0
+    repeated_failure_count: int = 0
+    oscillation_score: float = 0.0
+    # 测试通过率（地面真值，优先级高于 error_score）
+    test_pass_rate: float = 0.0   # 0.0~1.0，地面真值
+    # 统一误差分数（可配置权重，含噪声的 Analyzer 信号）
+    error_score: float = 0.0
+    # 趋势（基于 test_pass_rate 计算，不依赖噪声信号）
+    trend: str = "unknown"  # "improving" | "stalled" | "regressing" | "oscillating"
+
+
+class ConvergenceMetricsEvent(Event):
+    type: EventType = EventType.CONVERGENCE_METRICS
+    payload: dict[str, Any] = Field(default_factory=dict)
+    # payload keys: metrics (ConvergenceMetrics dict), trend, error_score, previous_error_score
+
+
 _EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.TASK_CREATED: TaskCreatedEvent,
     EventType.CODE_GENERATED: CodeGeneratedEvent,
@@ -182,6 +216,7 @@ _EVENT_TYPE_MAP: dict[EventType, type[Event]] = {
     EventType.CONVERGED: ConvergedEvent,
     EventType.STUCK: StuckEvent,
     EventType.ERROR_OCCURRED: ErrorOccurredEvent,
+    EventType.CONVERGENCE_METRICS: ConvergenceMetricsEvent,
 }
 
 

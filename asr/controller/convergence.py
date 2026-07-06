@@ -28,6 +28,8 @@ from asr.events.models import (
     StuckEvent,
     ErrorOccurredEvent,
     ConvergenceIterationEvent,
+    ConvergenceMetricsEvent,
+    ConvergenceMetrics,
 )
 from asr.events.store import EventStore
 from asr.spec.models import Specification
@@ -78,6 +80,25 @@ class ASRController:
         self._rollback_entries: list[PatchEntry] = []
         self._patch_lineage: list[dict] = []
         self._builder_counter = 0  # Counter for tracking builder invocations
+        # ── Control-theoretic metrics ──
+        self._metrics_history: list = []  # list[ConvergenceMetrics]
+        self._error_score_history: list[float] = []
+        self._patch_fingerprints: list[str] = []  # SHA-256 of diffs
+        self._failure_fingerprints: list[str] = []  # N1: SHA-256 of failure signatures
+        self._repair_mode: str = "INITIAL"  # Phase 2: auto-switch repair mode
+        self._pass_rate_history: list[float] = []  # ground-truth pass rate (PRIMARY signal)
+        self._no_improvement_streak: int = 0  # circuit breaker counter
+        self._prev_rollback_entries: list[PatchEntry] = []  # snapshot for REGRESSION_RECOVERY
+        # ── #1 fix: best snapshot for REGRESSION_RECOVERY ──
+        self._best_snapshot: dict | None = None  # {"iteration", "test_pass_rate", "rollback_entries"}
+        # ── #6 fix: hysteresis for mode switching ──
+        self._trend_history: list[str] = []
+        self._stalled_streak: int = 0
+        self._regressing_streak: int = 0
+        self._improving_streak: int = 0
+
+        # ── #3 fix: notify Builder after patch rejection ──
+        self._last_patch_rejection: tuple[int, str] | None = None  # (iteration, reason) from last rejected patch
 
     async def run(self, spec: Specification, task_id: str | None = None,
                   progress_callback=None) -> ConvergenceResult:
@@ -93,6 +114,7 @@ class ASRController:
         while iteration < self._config.convergence.max_iterations:
             iteration += 1
             result.iterations = iteration
+            self._current_iteration = iteration  # for repairing_phase
 
             if iteration > 1 and not prev_failures and not prev_feedback:
                 repair_events = []
@@ -147,20 +169,11 @@ class ASRController:
                     detail += f" 失败:{','.join(failed_names)}"
                 progress_callback(iteration, after_count, "TESTING", test_failed, test_error, detail)
 
-            if before_count > 0 and after_count > before_count and after_count > before_count * 1.5 and self._rollback_entries:
-                snapshotted = {e.file_path for e in self._rollback_entries}
-                for entry in reversed(self._rollback_entries):
-                    target = self._project_dir / entry.file_path
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(entry.original_content)
-                for f in self._project_dir.rglob("*"):
-                    if f.is_dir():
-                        continue
-                    if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")):
-                        continue
-                    rel = str(f.relative_to(self._project_dir))
-                    if rel not in snapshotted:
-                        f.unlink(missing_ok=True)
+            # FIX (Problem C): inline rollback removed — was conflicting with
+            # REGRESSION_RECOVERY. Now _compute_metrics sees the real post-Builder
+            # state, and REGRESSION_RECOVERY handles regressions properly.
+            # Save a copy for REGRESSION_RECOVERY mode (next iteration may need to rollback)
+            self._prev_rollback_entries = list(self._rollback_entries)
             self._rollback_entries.clear()
             before_count = after_count
 
@@ -169,6 +182,9 @@ class ASRController:
 
             # Determine if we should force analyzer (periodic code review every 3 builder calls)
             force_analyze = (self._builder_counter > 0 and self._builder_counter % 3 == 0)
+            # N2: always force analyzer in FINAL_VERIFICATION mode
+            if self._repair_mode == "FINAL_VERIFICATION":
+                force_analyze = True
             analysis_events = await self._analyzing_phase(task_id, test_events, force_analyze)
             result.events.extend(analysis_events)
             # spec_aligned only if there's a SPEC_ALIGNED event AND NO contradictory
@@ -196,16 +212,118 @@ class ASRController:
                 if self._convergence_streak >= 3:  # require 3 consecutive aligned rounds
                     self._emit_converged(task_id, iteration, result)
                     return result
+            # N2: FINAL_VERIFICATION — if tests pass but no analyzer ran this round,
+            # switch to FINAL_VERIFICATION mode to force a full analysis before converging
+            elif not test_failed and not test_error and not spec_aligned and not force_analyze:
+                # Tests pass but analyzer didn't run (no SPEC_ALIGNED).
+                # Force analyzer next round before declaring convergence.
+                self._repair_mode = "FINAL_VERIFICATION"
+                self._logger.log(
+                    "INFO",
+                    f"RepairMode → FINAL_VERIFICATION: tests pass but needs analyzer confirmation "
+                    f"(iter={iteration})",
+                    "controller"
+                )
+                self._convergence_streak = 0
+            # FIX (P0-2): FINAL_VERIFICATION + Analyzer found issues → exit to repair mode.
+            # Previously: FINAL_VERIFICATION had no exit — if Analyzer kept finding
+            # issues, Builder was told "don't modify code" every round → dead loop
+            # until max_iterations. Now: if Analyzer ran and found issues, switch
+            # to SPEC_COMPLETION (for missing features) or TEST_FIX (otherwise).
+            elif (not test_failed and not test_error and not spec_aligned
+                  and force_analyze and self._repair_mode == "FINAL_VERIFICATION"):
+                has_missing = any(
+                    e.type == EventType.SPEC_DIFF_FOUND
+                    and len(e.payload.get("missing_features", [])) > 0
+                    for e in analysis_events
+                )
+                self._repair_mode = "SPEC_COMPLETION" if has_missing else "TEST_FIX"
+                self._logger.log(
+                    "INFO",
+                    f"RepairMode: FINAL_VERIFICATION → {self._repair_mode} "
+                    f"(Analyzer found issues, tests pass but spec not aligned)",
+                    "controller"
+                )
+                self._convergence_streak = 0
             else:
                 self._convergence_streak = 0
 
-            prev_failures = []
+            # ── Control-theoretic: compute metrics, switch mode, build feedback ──
+            # Step 1: collect this iteration's failures (for next iteration's feedback)
+            this_iter_failures = []
             for evt in test_events:
                 if evt.type == EventType.TEST_FAILED:
                     for f in evt.payload.get("failures", []):
                         if f.get("nodeid") != "no_code":
-                            prev_failures.append(f)
+                            this_iter_failures.append(f)
+
+            # Step 2: compute metrics (uses ground-truth test results as primary signal)
+            metrics = self._compute_metrics(
+                iteration, test_events, analysis_events,
+                repair_events, this_iter_failures,
+            )
+            self._emit_metrics(task_id, metrics, result)
+
+            # Step 3: circuit breaker — stop if no meaningful progress
+            cfg = self._config.convergence
+            # Circuit breaker: stop if pass_rate is flat or decreasing.
+            # FIX (Problem A): previous code used `< prev + 0.05` which treated
+            # "improving by 4%" as "no improvement", causing premature stuck.
+            # Correct: only count as no-improvement if pass_rate did NOT increase.
+            if len(self._pass_rate_history) >= 2:
+                if self._pass_rate_history[-1] <= self._pass_rate_history[-2]:
+                    self._no_improvement_streak += 1
+                else:
+                    self._no_improvement_streak = 0
+            circuit_threshold = getattr(cfg, 'circuit_breaker_stagnant_iters', 6)
+            if self._no_improvement_streak >= circuit_threshold:
+                self._logger.log("WARN", f"Circuit breaker: no improvement in {self._no_improvement_streak} iters", "controller")
+                # Save state for human review
+                import json, time as _time
+                state_dir = self._project_dir / self._config.runtime.state_dir
+                state_dir.mkdir(parents=True, exist_ok=True)
+                snapshot = {
+                    "task_id": task_id or "unknown",
+                    "stopped_at": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "iteration": iteration,
+                    "test_pass_rate": metrics.test_pass_rate,
+                    "trend": metrics.trend,
+                    "error_score": metrics.error_score,
+                    "no_improvement_streak": self._no_improvement_streak,
+                    "repair_mode": self._repair_mode,
+                    "test_failed_count": metrics.test_failed_count,
+                    "test_error_count": metrics.test_error_count,
+                    "hint": "ASR could not converge. Review the project state and either adjust the spec or manually fix.",
+                }
+                snap_path = state_dir / f"stuck_{task_id or 'unknown'}_{iteration}.json"
+                with open(snap_path, 'w') as sf:
+                    json.dump(snapshot, sf, indent=2, ensure_ascii=False)
+                self._logger.log("INFO", f"Human-in-the-loop: state saved to {snap_path}", "controller")
+                self._emit_stuck(task_id, iteration, "circuit_breaker_no_improvement", test_events, result)
+                return result
+
+            # Step 4: mode switching (uses metrics.trend based on test_pass_rate)
+            self._check_and_switch_mode(metrics, task_id, result)
+
+            # Step 5: build feedback for next iteration's Builder
             current_feedback = []
+            current_feedback.append(
+                f"[REPAIR_MODE] {self._repair_mode} "
+                f"(iteration {iteration}, pass_rate={metrics.test_pass_rate:.2f}, trend={metrics.trend})"
+            )
+            # Also append mode transition history (last 3 modes) so Builder can see the pattern
+            if hasattr(self, '_mode_history'):
+                recent_modes = [m for m, _ in self._mode_history[-3:]]
+                if len(recent_modes) >= 2 and recent_modes[-1] != recent_modes[-2]:
+                    current_feedback.append(
+                        f"[MODE_HISTORY] {' → '.join(recent_modes)}"
+                    )
+            else:
+                self._mode_history = []
+
+            # Move prev_failures update to use this_iter_failures
+            prev_failures = this_iter_failures
+
             for evt in analysis_events:
                 if evt.type == EventType.ANALYZER_FEEDBACK:
                     findings = evt.payload.get("findings", [])
@@ -250,7 +368,19 @@ class ASRController:
                         current_feedback.append(f"[ANALYZER_ERROR] {error_msg}")
             if current_feedback:
                 current_feedback[-1] = f"{current_feedback[-1]} (迭代{iteration})"
-                prev_feedback = (prev_feedback + current_feedback)[-30:]
+                # P4 fix: reduce noise — keep only last 15 items (was 30).
+                # FIX (P1): mode_changed detection was broken — _mode_history only
+                # records actual transitions, so after 2+ transitions, comparing
+                # its last two entries always showed a change even when mode was
+                # stable. Track previous mode directly instead.
+                prev_mode = getattr(self, '_prev_mode_for_feedback', None)
+                mode_changed = prev_mode is not None and prev_mode != self._repair_mode
+                self._prev_mode_for_feedback = self._repair_mode
+                if mode_changed:
+                    # Keep only high-priority items from prev_feedback
+                    prev_feedback = [fb for fb in prev_feedback
+                                     if fb.startswith("[PRIORITY]") or fb.startswith("[COMPILE_ERROR]")]
+                prev_feedback = (prev_feedback + current_feedback)[-15:]
 
             self._write_and_log(ConvergenceIterationEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.SYSTEM,
@@ -291,9 +421,29 @@ class ASRController:
     async def _analyzing_phase(self, task_id: str, test_events: list[Event], force_analyze: bool = False) -> list[Event]:
         events: list[Event] = []
         test_summary = self._extract_test_summary(test_events)
+        # Compute diff from pre-Builder state for diff-only analysis
+        analysis_diff = ""
+        prev_entries = getattr(self, '_prev_rollback_entries', None) or []
+        if prev_entries:
+            import difflib as _difflib
+            diff_lines = []
+            for entry in prev_entries:
+                target = self._project_dir / entry.file_path
+                current = target.read_text() if target.exists() else ""
+                if current != entry.original_content:
+                    d = list(_difflib.unified_diff(
+                        entry.original_content.splitlines(keepends=True),
+                        current.splitlines(keepends=True),
+                        fromfile=f"a/{entry.file_path}",
+                        tofile=f"b/{entry.file_path}",
+                    ))
+                    diff_lines.extend(d)
+            if diff_lines:
+                analysis_diff = "".join(diff_lines)
         spec_diff = AnalyzeRequestedEvent(
             task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.ANALYZER,
-            payload={"project_path": str(self._project_dir), "test_summary": test_summary},
+            payload={"project_path": str(self._project_dir), "test_summary": test_summary,
+                     "diff": analysis_diff},
         )
         # Force analyzer to run every 3 builder invocations (periodic code review)
         # or when there are test failures
@@ -316,6 +466,64 @@ class ASRController:
         self, task_id: str, failures: list[dict], feedback: list[str]
     ) -> list[Event]:
         events: list[Event] = []
+        temperature_override: float | None = None  # #2 fix
+
+        # ── RepairMode behavioral constraints (Phase2 upgrade) ──
+        if self._repair_mode == "REGRESSION_RECOVERY" and len(self._patch_history) > 0:
+            # FIX (P0-1): Only roll back when actively regressing (streak >= 2).
+            # Previously the fallback at line 463 always triggered because
+            # _prev_rollback_entries is set every iteration (line 176), causing
+            # every REGRESSION_RECOVERY iteration to undo Builder's work —
+            # even when trend was already improving. This created an infinite
+            # loop: rollback → Builder improves → rollback again.
+            if self._regressing_streak >= 2:
+                restored = 0
+                source_files = None
+                if getattr(self, '_best_snapshot', None):
+                    # Use best snapshot: restore actual project file state from best iteration
+                    source_files = self._best_snapshot.get("files")
+                    self._logger.log(
+                        "INFO",
+                        f"REGRESSION_RECOVERY: rolling back to best snapshot "
+                        f"(iter {self._best_snapshot['iteration']}, "
+                        f"pass_rate={self._best_snapshot['test_pass_rate']:.2f})",
+                        "controller"
+                    )
+                if source_files is None and getattr(self, '_prev_rollback_entries', None):
+                    # Fallback: restore pre-patch state from rollback entries
+                    source_files = {}
+                    for entry in self._prev_rollback_entries:
+                        source_files[entry.file_path] = entry.original_content
+                    self._logger.log(
+                        "INFO",
+                        "REGRESSION_RECOVERY: rolling back to pre-patch state",
+                        "controller"
+                    )
+                if source_files:
+                    restored = self._restore_project_files(source_files)
+                    self._logger.log(
+                        "INFO",
+                        f"REGRESSION_RECOVERY: restored {restored} files",
+                        "controller"
+                    )
+                else:
+                    self._logger.log(
+                        "WARN",
+                        "REGRESSION_RECOVERY: no rollback snapshot available",
+                        "controller"
+                    )
+            else:
+                self._logger.log(
+                    "INFO",
+                    f"REGRESSION_RECOVERY: regressing_streak={self._regressing_streak}, "
+                    f"not rolling back — letting Builder try again on current state",
+                    "controller"
+                )
+
+        if self._repair_mode == "SPEC_COMPLETION":
+            # Mark: only allow new file creation, not modification of existing files
+            # This is enforced by adding a constraint to the feedback (see below)
+            pass
 
         # ── Diagnostic: snapshot project state before Builder runs ──
         import sys as _sys
@@ -342,9 +550,55 @@ class ASRController:
                     diff_text="", original_content=content,
                 ))
 
+            # ── RepairMode: modify payload based on current mode ──
+            mode_failures = list(failures)
+            mode_feedback = list(feedback)
+
+            if self._repair_mode == "COMPILE_FIX":
+                # Only pass compile errors (TEST_ERROR), filter out test failures
+                mode_failures = [f for f in failures if f.get("nodeid") == "compile_error"]
+                if not mode_failures:
+                    mode_failures = list(failures)  # fallback: still pass something
+                mode_feedback = [fb for fb in feedback if "[COMPILE_ERROR]" in fb]
+                mode_feedback.insert(0, "[MODE:COMPILE_FIX] 只修复编译错误，不要改逻辑，不要跑测试")
+
+            elif self._repair_mode == "SPEC_COMPLETION":
+                # Only add new files, don't modify existing ones
+                mode_feedback = list(feedback)
+                mode_feedback.insert(0, "[MODE:SPEC_COMPLETION] 只新增缺失的文件/功能，不要修改已有代码")
+
+            elif self._repair_mode == "OSCILLATION_BREAK":
+                mode_feedback = list(feedback)
+                mode_feedback.insert(0, "[MODE:OSCILLATION_BREAK] 前几轮在振荡，请更小步地修改（每次最多3个文件），先解释再动手")
+                temperature_override = 0.1  # #2 fix: lower temperature
+
+            elif self._repair_mode == "FINAL_VERIFICATION":
+                # N2: tests pass, but need analyzer confirmation.
+                # Don't ask Builder to make changes — just re-read DESIGN.md
+                # and verify completeness. This is a no-op repair that ensures
+                # the analyzer runs on the next iteration.
+                mode_feedback = ["[MODE:FINAL_VERIFICATION] 测试已通过，请重新阅读 DESIGN.md 逐项确认所有功能已实现，不做代码修改。如果一切完整，在 ANALYSIS_REPORT.md 中写 ALL CLEAR。"]
+
+            # #3 fix: if last patch was rejected, tell Builder why
+            if self._last_patch_rejection is not None:
+                last_iter, reason = self._last_patch_rejection
+                if last_iter == self._current_iteration - 1:
+                    mode_feedback.insert(0, f"[LAST_PATCH_REJECTED] {reason}")
+                self._last_patch_rejection = None  # clear after one reminder
+
+            # Build payload with optional temperature override (#2 fix)
+            patch_payload: dict = {
+                "failures": mode_failures,
+                "feedback": mode_feedback,
+                "project_path": str(self._project_dir),
+                "repair_mode": self._repair_mode,
+            }
+            if temperature_override is not None:
+                patch_payload["temperature_override"] = temperature_override
+
             patch_request = PatchRequestedEvent(
                 task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.BUILDER,
-                payload={"failures": failures, "feedback": feedback, "project_path": str(self._project_dir)},
+                payload=patch_payload,
             )
             result_events = await self._invoke_agent(self._builder, patch_request, task_id, "repairing")
             for evt in result_events:
@@ -394,6 +648,194 @@ class ASRController:
             if changed > 0:
                 diff_text = "".join(combined_diff)
                 summary = _compute_diff_summary(diff_text)
+
+                # ── Hard patch amplitude enforcement (Phase3 fix) ──
+                cfg = self._config.convergence
+                allow_large = cfg.allow_large_patch_in_initial and getattr(self, "_current_iteration", 0) <= 1
+                hard_reject = getattr(cfg, 'hard_reject_oversized_patch', True)
+                if (not allow_large) and hard_reject:
+                    if (summary.get("files", 0) > cfg.max_files_per_patch
+                            or (summary.get("added", 0) + summary.get("removed", 0)) > cfg.max_lines_per_patch):
+                        # Patch too large — reject and roll back
+                        reject_evt = PatchFailedEvent(
+                            task_id=task_id, from_agent=AgentName.CONTROLLER,
+                            to_agent=AgentName.BUILDER,
+                            payload={
+                                "file_path": "*",
+                                "error": (
+                                    f"[PATCH_REJECTED] Patch too large: "
+                                    f"{summary.get('files', 0)} files, "
+                                    f"{summary.get('added', 0) + summary.get('removed', 0)} lines. "
+                                    f"Limit: {cfg.max_files_per_patch} files, "
+                                    f"{cfg.max_lines_per_patch} lines. "
+                                    f"Please make a smaller, focused patch."
+                                ),
+                                "failed_hunk": None,
+                            },
+                        )
+                        self._event_store.write_event(reject_evt)
+                        events.append(reject_evt)
+                        # #3 fix: record rejection so next Builder call sees it
+                        self._last_patch_rejection = (
+                            self._current_iteration,
+                            f"[PATCH_REJECTED] Patch too large: "
+                            f"{summary.get('files', 0)} files, "
+                            f"{summary.get('added', 0) + summary.get('removed', 0)} lines."
+                        )
+                        # Roll back changes
+                        snapshotted_map = {e.file_path: e.original_content for e in self._rollback_entries}
+                        for entry in self._rollback_entries:
+                            target = self._project_dir / entry.file_path
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_text(entry.original_content)
+                        for f in self._project_dir.rglob("*"):
+                            if f.is_dir():
+                                continue
+                            if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")):
+                                continue
+                            rel = str(f.relative_to(self._project_dir))
+                            if rel not in snapshotted_map:
+                                f.unlink(missing_ok=True)
+                        return events  # <-- exit early, Builder will be re-invoked
+
+                applied = PatchAppliedEvent(
+                    task_id=task_id, from_agent=AgentName.BUILDER,
+                    to_agent=AgentName.CONTROLLER,
+                    payload={"file_path": "*", "success": True, "error": None},
+                )
+                self._event_store.write_event(applied)
+                events.append(applied)
+                # ── Formal Guards (Phase5): statically enforce invariants ──
+                guard_violations = []
+                snapshotted_files = {e.file_path for e in self._rollback_entries}
+
+                # Guard 1: No test files deleted
+                for entry in self._rollback_entries:
+                    if "test_" in entry.file_path or entry.file_path.startswith("tests/"):
+                        target = self._project_dir / entry.file_path
+                        if not target.exists():
+                            guard_violations.append(
+                                f"[GUARD:TEST_DELETED] {entry.file_path} — Builder must not delete tests"
+                            )
+
+                # Guard 2: Syntax check ALL .py files (modified + new)
+                import ast as _ast
+                # 2a: check modified files (in _rollback_entries)
+                for entry in self._rollback_entries:
+                    target = self._project_dir / entry.file_path
+                    if target.exists() and entry.file_path.endswith('.py'):
+                        try:
+                            content = target.read_text()
+                            _ast.parse(content)
+                        except SyntaxError as se:
+                            guard_violations.append(
+                                f"[GUARD:SYNTAX_ERROR] {entry.file_path}: {se}"
+                            )
+                # 2b: P1 fix — check NEW .py files created by Builder
+                #     (not in _rollback_entries, so Guard 2a misses them)
+                snapshotted_rels = {e.file_path for e in self._rollback_entries}
+                for f in self._project_dir.rglob("*.py"):
+                    if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".runtime", ".pytest_cache", ".git/", ".omo")):
+                        continue
+                    rel = str(f.relative_to(self._project_dir))
+                    if rel in snapshotted_rels:
+                        continue  # already checked in 2a
+                    try:
+                        content = f.read_text()
+                        _ast.parse(content)
+                    except SyntaxError as se:
+                        guard_violations.append(
+                            f"[GUARD:SYNTAX_ERROR] {rel}: {se}"
+                        )
+                    except UnicodeDecodeError:
+                        continue
+
+                # Guard 3 (N3): bypass detection — reject patches that bypass tests
+                # FIX (Problem D): "pass" as substring matches legit code like
+                # "class Foo: pass", "compass", "bypass". Use AST-level detection
+                # instead of raw substring matching.
+                if summary.get("bypass_detected", False):
+                    import ast as _ast_guard
+                    for diff_line in diff_text.split("\n"):
+                        if not diff_line.startswith("+"):
+                            continue
+                        stripped = diff_line[1:].strip()
+                        # Only check production code lines, not comments/strings
+                        if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
+                            continue
+                        # Precise patterns:
+                        # 1. bare "except:" (no exception type)
+                        if stripped.startswith("except:") or stripped.startswith("except :"):
+                            guard_violations.append(
+                                f"[GUARD:BYPASS] bare except: silences all errors"
+                            )
+                        # 2. "return expected" hardcoded return
+                        if "return expected" in stripped.lower():
+                            guard_violations.append(
+                                f"[GUARD:BYPASS] hardcoded 'return expected' detected"
+                            )
+                        # 3. mock( in non-test files — check the diff context
+                        # FIX (P2): was checking "test_" not in str(self._project_dir)
+                        # which checks the PROJECT DIRECTORY path, not the file path.
+                        # If project dir happens to contain "test_" (e.g. /projects/test_asr/),
+                        # the guard never triggers. Now check the diff line's file context.
+                        if "from unittest.mock import" in stripped:
+                            # Find which file this diff hunk belongs to
+                            # by looking back for the +++ b/ header
+                            diff_lines = diff_text.split("\n")
+                            current_file = ""
+                            for dl in diff_lines:
+                                if dl.startswith("+++ b/"):
+                                    current_file = dl[6:]
+                                if dl == diff_line:
+                                    break
+                            if "test_" not in current_file and not current_file.startswith("tests/"):
+                                guard_violations.append(
+                                    f"[GUARD:BYPASS] unittest.mock imported in production code ({current_file})"
+                                )
+                        # 4. @pytest.mark.skip
+                        if "@pytest.mark.skip" in stripped:
+                            guard_violations.append(
+                                f"[GUARD:BYPASS] test skipped instead of fixed"
+                            )
+
+                if guard_violations:
+                    for v in guard_violations:
+                        self._logger.log("WARN", v, "controller")
+                    reject_evt = PatchFailedEvent(
+                        task_id=task_id, from_agent=AgentName.CONTROLLER,
+                        to_agent=AgentName.BUILDER,
+                        payload={
+                            "file_path": "*",
+                            "error": f"[PATCH_GUARD_VIOLATION] " + "; ".join(guard_violations[:3]),
+                            "failed_hunk": None,
+                        },
+                    )
+                    self._event_store.write_event(reject_evt)
+                    events.append(reject_evt)
+                    # #3 fix: record rejection so next Builder call sees it
+                    self._last_patch_rejection = (
+                        self._current_iteration,
+                        f"[PATCH_GUARD_VIOLATION] " + "; ".join(guard_violations[:3])
+                    )
+                    # Roll back
+                    for entry in self._rollback_entries:
+                        target = self._project_dir / entry.file_path
+                        if entry.original_content:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_text(entry.original_content)
+                        elif target.exists():
+                            target.unlink()
+                    for f in self._project_dir.rglob("*"):
+                        if f.is_dir():
+                            continue
+                        if any(p in str(f) for p in ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")):
+                            continue
+                        rel = str(f.relative_to(self._project_dir))
+                        if rel not in snapshotted_files:
+                            f.unlink(missing_ok=True)
+                    return events  # exit early
+
                 applied = PatchAppliedEvent(
                     task_id=task_id, from_agent=AgentName.BUILDER,
                     to_agent=AgentName.CONTROLLER,
@@ -407,6 +849,10 @@ class ASRController:
                     "seq": len(self._patch_lineage) + 1,
                     "file": "*", "risk": summary,
                 })
+                # ── Patch fingerprint (Phase 2) ──
+                if diff_text:
+                    fp = self._compute_patch_fingerprint(diff_text)
+                    self._patch_fingerprints.append(fp)
         return events
 
     _PHASE_TIMEOUT_MAP = {
@@ -473,6 +919,368 @@ class ASRController:
                 failed = evt.payload.get("failed", failed)
                 failures = evt.payload.get("failures", [])
         return {"total": total, "passed": passed, "failed": failed, "failures": failures}
+
+
+    # ── Control-Theoretic Metrics (Phase 1) ──
+
+    def _compute_metrics(self, iteration: int,
+                          test_events: list, analysis_events: list,
+                          repair_events: list,
+                          prev_failures: list) -> "ConvergenceMetrics":
+        """Compute explicit error signals for this iteration.
+
+        First-principles:
+        - test_pass_rate is GROUND TRUTH (tests pass or fail).
+          This is the primary signal for trend/oscillation.
+        - error_score includes Analyzer findings (another LLM judgment),
+          which is noisy. error_score is logged but NOT used for control
+          decisions — using a noisy sensor for feedback is a control anti-pattern.
+        """
+        # ── Hard constraints (GROUND TRUTH) ──
+        test_failed_count = _count_failures(test_events)
+        test_error_count = sum(1 for e in test_events
+                               if e.type in (EventType.TEST_ERROR, EventType.ERROR_OCCURRED))
+
+        # ── test_pass_rate: ground truth, PRIMARY control signal ──
+        # FIX (Problem B): use max() for both total and passed to avoid
+        # double-counting when multiple test events exist in one round.
+        # Each test run produces exactly one TestFailed/Passed/Error event
+        # with the full {total, passed, failed} snapshot. Taking max()
+        # picks the most recent (and most accurate) snapshot.
+        total_tests = 0
+        passed_tests = 0
+        for evt in test_events:
+            if hasattr(evt, 'payload'):
+                total_tests = max(total_tests, evt.payload.get("total", 0))
+                passed_tests = max(passed_tests, evt.payload.get("passed", 0))
+        test_pass_rate = passed_tests / total_tests if total_tests > 0 else 0.0
+
+        # ── Semantic signals (noisy — from Analyzer LLM) ──
+        missing_feature_count = 0
+        logic_issue_count = 0
+        constraint_violation_count = 0
+        high_severity_count = 0
+
+        for evt in analysis_events:
+            if evt.type == EventType.SPEC_DIFF_FOUND:
+                missing_feature_count += len(evt.payload.get("missing_features", []))
+                logic_issue_count += len(evt.payload.get("logic_issues", []))
+                constraint_violation_count += len(evt.payload.get("constraint_violations", []))
+            elif evt.type == EventType.ANALYZER_FEEDBACK:
+                high_severity_count += evt.payload.get("high_severity_count", 0)
+
+        # ── Patch signals ──
+        patch_count = sum(1 for e in repair_events if e.type == EventType.PATCH_GENERATED)
+        changed_file_count = 0
+        changed_line_count = 0
+        for e in repair_events:
+            if e.type == EventType.PATCH_APPLIED:
+                summary = e.payload.get("summary", {})
+                if isinstance(summary, dict):
+                    changed_file_count += summary.get("files", 0)
+                    changed_line_count += summary.get("added", 0) + summary.get("removed", 0)
+
+        # ── Stability signals ──
+        rollback_count = sum(1 for e in repair_events if e.type == EventType.PATCH_ROLLED_BACK)
+
+        # N1: compute failure fingerprint and repeated_failure_count
+        current_fp = self._compute_failure_fingerprint(prev_failures)
+        self._failure_fingerprints.append(current_fp)
+        repeated_failure_count = 0
+        if len(self._failure_fingerprints) >= 2 and current_fp != "none":
+            # Count how many of the last 3 rounds had the same fingerprint
+            recent = self._failure_fingerprints[-4:-1]  # exclude current
+            repeated_failure_count = sum(1 for fp in recent if fp == current_fp)
+
+        # ── Oscillation score ──
+        # Primary: test_pass_rate history (does it go up-down-up?)
+        oscillation_score = 0.0
+        if len(self._pass_rate_history) >= 4:
+            recent = self._pass_rate_history[-4:]
+            deltas = [recent[i] - recent[i-1] for i in range(1, len(recent))]
+            # Alternating +/- deltas = oscillation
+            if len(deltas) >= 2 and deltas[-1] * deltas[-2] < 0:
+                oscillation_score = 0.7
+            if len(deltas) >= 3 and deltas[-1] * deltas[-2] < 0 and deltas[-2] * deltas[-3] < 0:
+                oscillation_score = 1.0
+        # Secondary: patch fingerprint (catches exact repetition)
+        if len(self._patch_fingerprints) >= 4:
+            recent_fp = self._patch_fingerprints[-4:]
+            if len(set(recent_fp)) <= 2 and recent_fp[0] == recent_fp[2] and recent_fp[1] == recent_fp[3]:
+                oscillation_score = max(oscillation_score, 0.9)
+        # N1: failure fingerprint — same tests failing 3+ times = stuck loop
+        if repeated_failure_count >= 3:
+            oscillation_score = max(oscillation_score, 0.85)
+
+        # ── Error score (noisy — includes Analyzer judgment) ──
+        # Weight justification (first-principles):
+        #   w_test_error=2.0  — compile/syntax error is more fundamental than
+        #                         a test failure (Builder can't write valid code)
+        #   w_test_failed=1.0  — baseline: one test failure = 1 unit
+        #   w_missing_feature=1.5 — missing feature > wrong impl (nothing vs. something)
+        #   w_high_severity=2.0 — Analyzer marked this as critical
+        #   w_patch_regression=1.0 — a patch that made things worse
+        cfg = self._config.convergence
+        error_score = (
+            cfg.w_test_failed * test_failed_count
+            + cfg.w_test_error * test_error_count
+            + cfg.w_missing_feature * missing_feature_count
+            + cfg.w_logic_issue * logic_issue_count
+            + cfg.w_constraint_violation * constraint_violation_count
+            + cfg.w_high_severity * high_severity_count
+            + cfg.w_patch_regression * rollback_count
+        )
+
+        # ── Trend: based on test_pass_rate (ground truth), NOT error_score ──
+        trend = "unknown"
+        if len(self._pass_rate_history) >= 2:
+            prev_rate = self._pass_rate_history[-1]
+            delta = test_pass_rate - prev_rate
+            if delta > 0.05:
+                trend = "improving"
+            elif delta < -0.05:
+                trend = "regressing"
+            else:
+                trend = "stalled"
+                # Check for oscillation pattern in pass rate history
+                if len(self._pass_rate_history) >= 4:
+                    r = self._pass_rate_history[-4:]
+                    if (r[0] < r[1] > r[2] < r[3]) or (r[0] > r[1] < r[2] > r[3]):
+                        trend = "oscillating"
+
+        metrics = ConvergenceMetrics(
+            iteration=iteration,
+            test_failed_count=test_failed_count,
+            test_error_count=test_error_count,
+            missing_feature_count=missing_feature_count,
+            logic_issue_count=logic_issue_count,
+            constraint_violation_count=constraint_violation_count,
+            high_severity_count=high_severity_count,
+            patch_count=patch_count,
+            changed_file_count=changed_file_count,
+            changed_line_count=changed_line_count,
+            rollback_count=rollback_count,
+            repeated_failure_count=repeated_failure_count,
+            oscillation_score=oscillation_score,
+            test_pass_rate=test_pass_rate,
+            error_score=error_score,
+            trend=trend,
+        )
+
+        self._metrics_history.append(metrics)
+        self._error_score_history.append(error_score)
+        self._pass_rate_history.append(test_pass_rate)
+        # P0 fix: save best snapshot with ACTUAL project file state (post-Builder),
+        # not _rollback_entries (which are pre-Builder snapshots and get cleared).
+        # When test_pass_rate hits a new high, snapshot all .py files so
+        # REGRESSION_RECOVERY can restore the best-known-good state.
+        if not hasattr(self, '_best_snapshot') or self._best_snapshot is None:
+            self._best_snapshot = {
+                "iteration": iteration,
+                "test_pass_rate": test_pass_rate,
+                "files": self._snapshot_project_files(),
+            }
+        elif test_pass_rate > self._best_snapshot["test_pass_rate"] + 0.01:
+            self._best_snapshot = {
+                "iteration": iteration,
+                "test_pass_rate": test_pass_rate,
+                "files": self._snapshot_project_files(),
+            }
+            self._logger.log(
+                "INFO",
+                f"Best snapshot saved: iter={iteration}, pass_rate={test_pass_rate:.2f}",
+                "controller"
+            )
+
+        return metrics
+
+    def _emit_metrics(self, task_id: str, metrics: "ConvergenceMetrics",
+                      result: "ConvergenceResult") -> None:
+        """Emit ConvergenceMetricsEvent and update progress callback."""
+        evt = ConvergenceMetricsEvent(
+            task_id=task_id,
+            from_agent=AgentName.CONTROLLER,
+            to_agent=AgentName.SYSTEM,
+            payload={
+                "metrics": metrics.model_dump(),
+                "trend": metrics.trend,
+                "error_score": metrics.error_score,
+                "previous_error_score": self._error_score_history[-2] if len(self._error_score_history) >= 2 else None,
+            },
+        )
+        self._write_and_log(evt, result)
+
+        # Log convergence trend
+        if self._logger:
+            self._logger.log_convergence(
+                self._current_iteration, metrics.test_failed_count,
+                "METRICS",
+                f"pass_rate={metrics.test_pass_rate:.2f} trend={metrics.trend} "
+                f"[Analyzer噪声]error_score={metrics.error_score:.1f}"
+            )
+
+    def _compute_patch_fingerprint(self, diff_text: str) -> str:
+        """Compute SHA-256 fingerprint of a patch diff."""
+        import hashlib
+        return hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:16]
+
+    def _compute_failure_fingerprint(self, failures: list[dict]) -> str:
+        """N1: Compute SHA-256 fingerprint of test failure signatures.
+
+        Groups failures by nodeid (ignoring variable error messages) so that
+        the same test failing across iterations produces the same fingerprint.
+        """
+        import hashlib
+        if not failures:
+            return "none"
+        nodeids = sorted(f.get("nodeid", "?") for f in failures)
+        raw = "|".join(nodeids)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _snapshot_project_files(self) -> dict[str, str]:
+        """Snapshot all project source files (post-Builder state).
+
+        P0 fix: _rollback_entries stores PRE-Builder state and gets cleared
+        in run(). For REGRESSION_RECOVERY we need the POST-Builder state at
+        the best iteration. This method captures the actual file contents.
+        """
+        skip = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache", ".omo")
+        result = {}
+        for f in self._project_dir.rglob("*"):
+            if f.is_dir():
+                continue
+            if any(p in str(f) for p in skip):
+                continue
+            try:
+                content = f.read_text()
+                rel = str(f.relative_to(self._project_dir))
+                result[rel] = content
+            except (UnicodeDecodeError, OSError):
+                continue
+        return result
+
+    def _restore_project_files(self, files: dict[str, str]) -> int:
+        """Restore project files from a snapshot dict. Returns count restored."""
+        skip = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache", ".omo")
+        restored = 0
+        # Restore all files from snapshot
+        for rel, content in files.items():
+            target = self._project_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.write_text(content)
+                restored += 1
+            except OSError:
+                pass
+        # Remove files that exist now but weren't in snapshot (created after best)
+        snapshotted_set = set(files.keys())
+        for f in self._project_dir.rglob("*"):
+            if f.is_dir():
+                continue
+            if any(p in str(f) for p in skip):
+                continue
+            rel = str(f.relative_to(self._project_dir))
+            if rel not in snapshotted_set:
+                f.unlink(missing_ok=True)
+        return restored
+
+
+    def _check_and_switch_mode(self, metrics: "ConvergenceMetrics",
+                                task_id: str, result: "ConvergenceResult") -> str:
+        """Decide whether to switch RepairMode, with hysteresis to prevent flapping."""
+        # #6 fix: update trend history and streaks for hysteresis
+        self._trend_history.append(metrics.trend)
+        if len(self._trend_history) > 5:
+            self._trend_history = self._trend_history[-5:]
+
+        # Update streaks
+        if metrics.trend == "stalled":
+            self._stalled_streak += 1
+        else:
+            self._stalled_streak = 0
+        if metrics.trend == "regressing":
+            self._regressing_streak += 1
+        else:
+            self._regressing_streak = 0
+        if metrics.trend == "improving":
+            self._improving_streak += 1
+        else:
+            self._improving_streak = 0
+
+        # Decide new mode (hysteresis: only switch if streak >= 2)
+        new_mode = self._repair_mode  # default: keep current
+
+        # P3 fix: exit OSCILLATION_BREAK when improving for 2+ iters
+        if self._repair_mode == "OSCILLATION_BREAK" and self._improving_streak >= 2:
+            new_mode = "TEST_FIX"
+            self._logger.log(
+                "INFO",
+                f"RepairMode: OSCILLATION_BREAK → TEST_FIX "
+                f"(improving_streak={self._improving_streak}, oscillation resolved)",
+                "controller"
+            )
+
+        # FIX (P0-1): exit REGRESSION_RECOVERY as soon as trend improves once.
+        # No need to wait for streak >= 2 — the rollback already happened once,
+        # and if Builder made progress on the rolled-back state, we should let
+        # it continue without further rollback interference.
+        elif self._repair_mode == "REGRESSION_RECOVERY" and self._improving_streak >= 1:
+            new_mode = "TEST_FIX"
+            self._logger.log(
+                "INFO",
+                f"RepairMode: REGRESSION_RECOVERY → TEST_FIX "
+                f"(improving_streak={self._improving_streak}, regression recovered)",
+                "controller"
+            )
+
+        # FIX (P0-2): exit FINAL_VERIFICATION if Analyzer aligned (safety net —
+        # the primary exit is in run() where we have analysis_events context).
+        # If _check_and_switch_mode is called while still in FINAL_VERIFICATION
+        # and spec_aligned was true, fall through to TEST_FIX.
+        elif self._repair_mode == "FINAL_VERIFICATION" and metrics.test_pass_rate >= 1.0:
+            # Tests all pass and we're in FINAL_VERIFICATION — if Analyzer
+            # didn't flag anything this round, let convergence logic handle it.
+            # If Analyzer DID flag something, run() already switched the mode.
+            pass  # no-op: let convergence_streak logic handle it
+
+        elif metrics.oscillation_score >= 0.7:
+            new_mode = "OSCILLATION_BREAK"
+            self._write_and_log(StuckEvent(
+                task_id=task_id, from_agent=AgentName.CONTROLLER,
+                to_agent=AgentName.SYSTEM,
+                payload={"reason": "pass_rate_oscillation",
+                         "last_iteration": metrics.iteration,
+                         "oscillation_score": metrics.oscillation_score},
+            ), result)
+
+        elif self._regressing_streak >= 2 and metrics.iteration > 3:
+            new_mode = "REGRESSION_RECOVERY"
+
+        elif self._stalled_streak >= 2 and metrics.iteration > 2:
+            if metrics.missing_feature_count > 0:
+                new_mode = "SPEC_COMPLETION"
+            else:
+                new_mode = "TEST_FIX"
+
+        elif metrics.iteration == 1:
+            new_mode = "INITIAL_GENERATION"
+
+        # Apply mode change
+        if new_mode != self._repair_mode:
+            self._logger.log(
+                "INFO",
+                f"RepairMode: {self._repair_mode} → {new_mode} "
+                f"(trend={metrics.trend}, pass_rate={metrics.test_pass_rate:.2f}, "
+                f"stalled_streak={self._stalled_streak})",
+                "controller"
+            )
+            if not hasattr(self, '_mode_history'):
+                self._mode_history = []
+            self._mode_history.append((new_mode, metrics.iteration))
+            self._repair_mode = new_mode
+
+        return self._repair_mode
+
 
     def _write_and_log(self, event: Event, result: ConvergenceResult) -> None:
         self._event_store.write_event(event)

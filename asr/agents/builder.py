@@ -38,11 +38,12 @@ class BuilderAgent(BaseAgent):
     async def _handle_patch_request(self, event: Event) -> list[Event]:
         failures = event.payload.get("failures", [])
         feedback = event.payload.get("feedback", [])
-        return await self._generate_patch(event.task_id, failures, feedback)
+        temperature = event.payload.get("temperature_override", None)
+        return await self._generate_patch(event.task_id, failures, feedback, temperature)
 
-    async def _generate_patch(self, task_id: str, failures: list[dict], feedback: list[str]) -> list[Event]:
+    async def _generate_patch(self, task_id: str, failures: list[dict], feedback: list[str], temperature: float | None = None) -> list[Event]:
         prompt = self._build_patch_prompt(failures, feedback)
-        sid, pt, ct, tt = await opencode_run(prompt, self._project_dir, self._opencode_session_id, label="Builder")
+        sid, pt, ct, tt = await opencode_run(prompt, self._project_dir, self._opencode_session_id, label="Builder", temperature=temperature)
         log_token_usage("builder", "opencode/glm-4.7-fp8",
                         {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt})
         if sid:

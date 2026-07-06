@@ -23,11 +23,24 @@ _ANALYSIS_REPORT_FILE = "ANALYSIS_REPORT.md"
 
 
 @dataclass
+class StructuredFinding:
+    """Single structured finding from Analyzer."""
+    category: str = ""       # MISSING | LOGIC | CONSTRAINT | DEVIATION
+    severity: str = ""       # HIGH | MEDIUM | LOW
+    confidence: float = 0.0  # 0.0-1.0
+    message: str = ""
+    evidence: list[str] = field(default_factory=list)
+    affected_files: list[str] = field(default_factory=list)
+    blocking: bool = False
+
+
+@dataclass
 class AnalysisReport:
     aligned: bool = False
     full_text: str = ""
     high_severity_count: int = 0
     findings: list[str] = field(default_factory=list)
+    structured_findings: list[StructuredFinding] = field(default_factory=list)
 
 
 def _split_findings(text: str) -> list[str]:
@@ -126,7 +139,8 @@ class AnalyzerAgent(BaseAgent):
 
     async def _handle_analysis_request(self, event: Event) -> list[Event]:
         test_summary = event.payload.get("test_summary", {})
-        report = await self._analyze(test_summary)
+        diff_text = event.payload.get("diff", "")
+        report = await self._analyze(test_summary, diff_text)
         if report.aligned:
             return [SpecAlignedEvent(
                 task_id=event.task_id, from_agent=AgentName.ANALYZER,
@@ -136,6 +150,12 @@ class AnalyzerAgent(BaseAgent):
 
         findings = report.findings if report.findings else [report.full_text] if report.full_text else []
         missing_features, logic_issues, constraint_violations = _classify_findings(findings)
+        # Build structured summary for Controller
+        blocking_findings = [sf.message for sf in report.structured_findings if sf.blocking]
+        high_confidence_findings = [
+            sf.message for sf in report.structured_findings
+            if sf.severity in ("HIGH", "CRITICAL") and sf.confidence >= 0.7
+        ]
 
         return [
             SpecDiffFoundEvent(
@@ -143,17 +163,22 @@ class AnalyzerAgent(BaseAgent):
                 to_agent=AgentName.CONTROLLER,
                 payload={"missing_features": missing_features,
                          "logic_issues": logic_issues,
-                         "constraint_violations": constraint_violations},
+                         "constraint_violations": constraint_violations,
+                         "structured_findings": [sf.__dict__ for sf in report.structured_findings]},
             ),
             AnalyzerFeedbackEvent(
                 task_id=event.task_id, from_agent=AgentName.ANALYZER,
                 to_agent=AgentName.BUILDER,
-                payload={"findings": findings, "recommendation": "",
-                         "high_severity_count": report.high_severity_count},
+                payload={"findings": findings,
+                         "recommendation": "",
+                         "high_severity_count": report.high_severity_count,
+                         "blocking_findings": blocking_findings,
+                         "structured_findings": [sf.__dict__ for sf in report.structured_findings]},
             ),
         ]
 
-    async def _analyze(self, test_summary: dict | None = None) -> AnalysisReport:
+    async def _analyze(self, test_summary: dict | None = None,
+                        diff_text: str = "") -> AnalysisReport:
         # ── Build test info ──
         test_info = ""
         if test_summary:
@@ -172,15 +197,50 @@ class AnalyzerAgent(BaseAgent):
                 test_info = "\n注意：当前没有任何测试通过，项目可能无法编译或缺少测试文件。\n"
 
         # ── Build the prompt — opencode can use tools, but must write final result to a file ──
+        diff_instructions = ""
+        if diff_text:
+            diff_instructions = (
+                "**优先分析本轮变更（DIFF.patch）：**\n"
+                "1. 先阅读 DIFF.patch 了解本轮变更内容\n"
+                "2. 只针对 DIFF.patch 涉及的源文件做深入分析，不要阅读整个代码库\n"
+                "3. 重点关注：变更是否修复了测试失败、是否引入了新问题\n\n"
+            )
+        else:
+            diff_instructions = (
+                "**全量分析模式：** DIFF.patch 不存在或为空，说明这是初始生成后的第一次分析（或上一轮 patch 为空）。\n"
+                "请阅读所有源码文件，做全量检查。\n\n"
+            )
+        # P5 fix: conditionally include "阅读所有源码文件" instruction.
+        # In diff mode this contradicts "只针对 DIFF.patch 涉及的源文件做深入分析".
+        if diff_text:
+            source_instruction = (
+                "分析任务：\n"
+                "1. 读取 DESIGN.md 了解系统设计\n"
+                "2. 只阅读 DIFF.patch 涉及的源文件，对比设计文档与实现代码\n"
+                "3. 重点关注测试失败对应的功能模块\n\n"
+            )
+        else:
+            source_instruction = (
+                "分析任务：\n"
+                "1. 读取 DESIGN.md 了解系统设计\n"
+                "2. 阅读所有源码文件，对比设计文档与实现代码\n"
+                "3. 重点关注测试失败对应的功能模块\n\n"
+            )
         prompt = (
             test_info +
-            "分析任务：\n"
-            "1. 读取 DESIGN.md 了解系统设计\n"
-            "2. 阅读所有源码文件，对比设计文档与实现代码\n"
-            "3. 重点关注测试失败对应的功能模块\n\n"
+            diff_instructions +
+            source_instruction +
             "**重要：完成所有分析后，按以下格式将最终结论写入 ANALYSIS_REPORT.md 文件。**\n\n"
-            "ANALYSIS_REPORT.md 格式要求：\n"
-            "- 每个发现单独一行，格式为 [CATEGORY] [SEVERITY] 具体问题描述\n"
+            "ANALYSIS_REPORT.md 格式要求（结构化输出）：\n"
+            "- 每个发现格式：[CATEGORY] [SEVERITY] [CONFIDENCE] 问题描述 | affected: file1,file2 | evidence: 具体证据\n"
+            "- CATEGORY: MISSING（缺失功能）、LOGIC（逻辑错误）、CONSTRAINT（违反约束）、DEVIATION（推演偏差）\n"
+            "- SEVERITY: [HIGH]、[MEDIUM]、[LOW]\n"
+            "- CONFIDENCE: [0.0-1.0] 表示你对该判断的信心\n"
+            "- affected: 列出受影响的文件路径\n"
+            "- evidence: 具体证据（DESIGN.md 第几节、代码行号）\n"
+            "- blocking: 如果为 [HIGH] 且 confidence>=0.7，标注 [BLOCKING]\n"
+            "- 如果实现完全符合设计文档，只写 ALL CLEAR\n"
+            "- 示例：[MISSING] [HIGH] [0.92] OAuth2.0 登录未实现 | affected: src/auth.py | evidence: DESIGN.md 第3节要求认证\n"
             "- CATEGORY: MISSING（缺失功能）、LOGIC（逻辑错误）、CONSTRAINT（违反约束）、DEVIATION（推演偏差）\n"
             "- SEVERITY: [HIGH]、[MEDIUM]、[LOW]\n"
             "- 如果实现完全符合设计文档，只写 ALL CLEAR\n\n"
@@ -197,6 +257,11 @@ class AnalyzerAgent(BaseAgent):
         if sandbox.exists():
             shutil.rmtree(sandbox, ignore_errors=True)
         sandbox.mkdir(parents=True, exist_ok=True)
+
+        # Write diff to DIFF.patch for diff-only analysis
+        if diff_text:
+            diff_path = sandbox / "DIFF.patch"
+            diff_path.write_text(diff_text)
 
         for f in self._project_dir.rglob("*"):
             if f.is_dir():
@@ -245,6 +310,23 @@ class AnalyzerAgent(BaseAgent):
         if re.search(r'ALL\s*CLEAR', report_text, re.IGNORECASE) and not has_issues:
             return AnalysisReport(aligned=True)
 
+        # ── Try structured parsing first ──
+        structured = []
+        for line in report_text.split("\n"):
+            sf = _parse_structured_finding(line)
+            if sf:
+                structured.append(sf)
+        if structured:
+            high_count = sum(1 for sf in structured if sf.severity == "HIGH")
+            return AnalysisReport(
+                aligned=False,
+                full_text=report_text,
+                high_severity_count=high_count,
+                findings=[sf.message for sf in structured],
+                structured_findings=structured,
+            )
+
+        # ── Fallback: old text-based parsing ──
         high_count = len(re.findall(r'\[HIGH\]|\[CRITICAL\]', report_text, re.IGNORECASE))
         findings = _split_findings(report_text)
 
@@ -254,6 +336,50 @@ class AnalyzerAgent(BaseAgent):
             high_severity_count=high_count,
             findings=findings,
         )
+
+
+
+
+def _parse_structured_finding(line: str) -> "StructuredFinding | None":
+    """Parse a single structured finding line."""
+    import re
+    m = re.match(
+        r'\s*\[(\w+)\]\s*\[(\w+)\]\s*\[?(\d?\d?\.\d+)?\]?\s*(.*)',
+        line.strip()
+    )
+    if not m:
+        return None
+    cat = m.group(1)
+    sev = m.group(2)
+    conf = float(m.group(3)) if m.group(3) else 0.5
+    rest = m.group(4)
+
+    # Extract affected files
+    affected = []
+    aff_match = re.search(r'\|\s*affected:\s*([^|\n]+)', rest)
+    if aff_match:
+        affected = [f.strip() for f in aff_match.group(1).split(",")]
+
+    # Extract evidence
+    evidence = []
+    ev_match = re.search(r'\|\s*evidence:\s*([^|\n]+)', rest)
+    if ev_match:
+        evidence = [ev_match.group(1).strip()]
+
+    # Extract message (before first |)
+    msg = rest.split("|")[0].strip() if "|" in rest else rest.strip()
+
+    blocking = (sev == "HIGH" and conf >= 0.7)
+
+    return StructuredFinding(
+        category=cat,
+        severity=sev,
+        confidence=conf,
+        message=msg,
+        evidence=evidence,
+        affected_files=affected,
+        blocking=blocking,
+    )
 
 
 def _classify_findings(findings: list[str]) -> tuple[list[str], list[str], list[str]]:
