@@ -46,6 +46,10 @@ class ConvergenceConfig(BaseModel):
     hard_reject_oversized_patch: bool = True
     # Circuit breaker：连续 N 轮 test_pass_rate 无改善则停止
     circuit_breaker_stagnant_iters: int = 6
+    # P0-1: 增量测试 — 每 N 轮跑一次全量测试校准
+    incremental_test_interval: int = 3
+    # P1-2: 自适应限幅 — 是否启用动态限幅
+    adaptive_limits: bool = True
 
 
 class RuntimeConfig(BaseModel):

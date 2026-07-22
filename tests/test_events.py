@@ -13,7 +13,7 @@ from asr.events.models import (
     TestFailedEvent, TestPassedEvent, TestErrorEvent, SpecDiffFoundEvent,
     SpecAlignedEvent, PatchGeneratedEvent, PatchAppliedEvent, PatchFailedEvent,
     PatchRolledBackEvent, AnalyzerFeedbackEvent, ConvergenceIterationEvent,
-    ConvergedEvent, StuckEvent, ErrorOccurredEvent, MeshVerdictEvent,
+    ConvergedEvent, StuckEvent, ErrorOccurredEvent,
     event_from_dict,
 )
 from asr.events.store import EventStore
@@ -308,22 +308,18 @@ def test_error_occurred_event():
     assert event.payload == payload
 
 
-def test_mesh_verdict_event():
-    """Test MeshVerdictEvent."""
-    payload = {
-        "agent": "security",
-        "severity": "high",
-        "finding": "security issue found",
-        "passed": False
-    }
-    event = MeshVerdictEvent(
+def test_convergence_metrics_event():
+    """Test ConvergenceMetricsEvent."""
+    from asr.events.models import ConvergenceMetricsEvent, ConvergenceMetrics
+    metrics = ConvergenceMetrics(iteration=1, test_pass_rate=0.5, trend="improving")
+    event = ConvergenceMetricsEvent(
         task_id="task-123",
-        from_agent=AgentName.SECURITY,
-        to_agent=AgentName.CONTROLLER,
-        payload=payload
+        from_agent=AgentName.CONTROLLER,
+        to_agent=AgentName.SYSTEM,
+        payload={"metrics": metrics.model_dump(), "trend": "improving"},
     )
-    assert event.type == EventType.MESH_VERDICT
-    assert event.payload == payload
+    assert event.type == EventType.CONVERGENCE_METRICS
+    assert event.payload["trend"] == "improving"
 
 
 def test_event_serialization():
@@ -359,7 +355,7 @@ def test_event_from_dict():
 
 
 def test_event_from_dict_unknown_type():
-    """Test event_from_dict with unknown event type."""
+    """Test event_from_dict with unknown event type raises ValueError."""
     data = {
         "event_id": "event-123",
         "task_id": "task-123",
@@ -368,9 +364,9 @@ def test_event_from_dict_unknown_type():
         "to_agent": "builder",
         "payload": {}
     }
-    event = event_from_dict(data)
-    assert isinstance(event, Event)
-    assert not isinstance(event, TaskCreatedEvent)
+    # EventType enum raises ValueError for unknown types
+    with pytest.raises(ValueError):
+        event_from_dict(data)
 
 
 @pytest.fixture

@@ -205,35 +205,25 @@ class TestASRController:
         content = controller._read_file_safe("nonexistent.py")
         assert content is None
 
-    def test_controller_compute_risk(self, minimal_config, event_store, temp_project_dir):
-        """Test _compute_risk method."""
-        controller = ASRController(
-            config=minimal_config,
-            event_store=event_store,
-            project_dir=temp_project_dir
-        )
-
+    def test_controller_compute_diff_summary(self, minimal_config, event_store, temp_project_dir):
+        """Test _compute_diff_summary function (replaces _compute_risk)."""
+        from asr.controller.convergence import _compute_diff_summary
         diff = "--- a/test.py\n+++ b/test.py\n-old\n+new\n-old2\n+new2"
-        risk = controller._compute_risk(diff)
-        assert "score" in risk
-        assert "lines_added" in risk
-        assert "lines_removed" in risk
-        assert "files_touched" in risk
-        assert "bypass_detected" in risk
-        assert risk["lines_added"] == 2
-        assert risk["lines_removed"] == 2
+        summary = _compute_diff_summary(diff)
+        assert "files" in summary
+        assert "added" in summary
+        assert "removed" in summary
+        assert "bypass_detected" in summary
+        assert "risk_score" in summary
+        assert summary["added"] == 2
+        assert summary["removed"] == 2
 
-    def test_controller_compute_risk_with_bypass(self, minimal_config, event_store, temp_project_dir):
-        """Test _compute_risk with bypass detection."""
-        controller = ASRController(
-            config=minimal_config,
-            event_store=event_store,
-            project_dir=temp_project_dir
-        )
-
+    def test_controller_compute_diff_summary_with_bypass(self, minimal_config, event_store, temp_project_dir):
+        """Test _compute_diff_summary with bypass detection."""
+        from asr.controller.convergence import _compute_diff_summary
         diff = "--- a/test.py\n+++ b/test.py\n-old\n+pass"
-        risk = controller._compute_risk(diff)
-        assert risk["bypass_detected"] is True
+        summary = _compute_diff_summary(diff)
+        assert summary["bypass_detected"] is True
 
     def test_controller_lineage_summary(self, minimal_config, event_store, temp_project_dir):
         """Test lineage_summary method."""
@@ -248,47 +238,39 @@ class TestASRController:
         assert len(lineage) == 1
         assert lineage[0]["seq"] == 1
 
-    def test_controller_detect_stable_diff(self, minimal_config, event_store, temp_project_dir):
-        """Test _detect_stable_diff method."""
+    def test_controller_patch_fingerprint(self, minimal_config, event_store, temp_project_dir):
+        """Test _compute_patch_fingerprint method (replaces _detect_stable_diff)."""
         controller = ASRController(
             config=minimal_config,
             event_store=event_store,
             project_dir=temp_project_dir
         )
+        fp1 = controller._compute_patch_fingerprint("diff A")
+        fp2 = controller._compute_patch_fingerprint("diff A")
+        fp3 = controller._compute_patch_fingerprint("diff B")
+        assert fp1 == fp2  # same diff → same fingerprint
+        assert fp1 != fp3  # different diff → different fingerprint
+        assert len(fp1) == 16  # SHA-256 truncated to 16 chars
 
-        assert controller._detect_stable_diff() is False
-
-        diff = "same diff"
-        event = PatchGeneratedEvent(
-            task_id="task-1", from_agent=AgentName.BUILDER, to_agent=AgentName.CONTROLLER,
-            payload={"diff_text": diff}
-        )
-        for _ in range(2):
-            controller._patch_history.append(event)
-
-        assert controller._detect_stable_diff() is True
-
-    def test_controller_detect_patch_oscillation(self, minimal_config, event_store, temp_project_dir):
-        """Test _detect_patch_oscillation method."""
+    def test_controller_failure_fingerprint(self, minimal_config, event_store, temp_project_dir):
+        """Test _compute_failure_fingerprint method (replaces _detect_patch_oscillation)."""
         controller = ASRController(
             config=minimal_config,
             event_store=event_store,
             project_dir=temp_project_dir
         )
-
-        assert controller._detect_patch_oscillation() is False
-
-        diff1 = "diff A"
-        diff2 = "diff B"
-        for i in range(3):
-            diff = diff1 if i % 2 == 0 else diff2
-            event = PatchGeneratedEvent(
-                task_id="task-1", from_agent=AgentName.BUILDER, to_agent=AgentName.CONTROLLER,
-                payload={"diff_text": diff}
-            )
-            controller._patch_history.append(event)
-
-        assert controller._detect_patch_oscillation() is True
+        # No failures → "none"
+        assert controller._compute_failure_fingerprint([]) == "none"
+        # Same failures → same fingerprint
+        failures_a = [{"nodeid": "test_1"}, {"nodeid": "test_2"}]
+        failures_b = [{"nodeid": "test_2"}, {"nodeid": "test_1"}]  # order doesn't matter
+        fp_a = controller._compute_failure_fingerprint(failures_a)
+        fp_b = controller._compute_failure_fingerprint(failures_b)
+        assert fp_a == fp_b
+        # Different failures → different fingerprint
+        failures_c = [{"nodeid": "test_3"}]
+        fp_c = controller._compute_failure_fingerprint(failures_c)
+        assert fp_a != fp_c
 
 
 class TestCountFailures:

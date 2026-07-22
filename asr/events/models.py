@@ -188,6 +188,8 @@ class ConvergenceMetrics(BaseModel):
     error_score: float = 0.0
     # 趋势（基于 test_pass_rate 计算，不依赖噪声信号）
     trend: str = "unknown"  # "improving" | "stalled" | "regressing" | "oscillating"
+    # P1-1: 双传感器交叉验证
+    sensor_disagreement: str = "AGREED"  # "AGREED" | "INCOMPLETE_TESTS" | "TEST_QUALITY_ISSUE"
 
 
 class ConvergenceMetricsEvent(Event):

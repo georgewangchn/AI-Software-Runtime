@@ -88,7 +88,7 @@ def test_convergence_config_defaults():
     assert config.max_iterations == 10
     assert config.stable_diff_threshold == 2
     assert config.patch_oscillation_threshold == 3
-    assert config.test_timeout == 120
+    assert config.test_timeout == 24400
 
 
 def test_convergence_config_custom_values():

@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asr-runtime"
+version = "3.0.0"
+description = "AI Software Runtime — a cybernetics-based autonomous software engineering convergence runtime"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "George Wang", email = "george@senlinpubu.top"},
+]
+keywords = ["ai", "llm", "cybernetics", "code-generation", "convergence", "opencode"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "pydantic>=2",
+    "pyyaml>=6",
+    "filelock>=3",
+    "click>=8",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9",
+    "pytest-asyncio>=1",
+]
+
+[project.scripts]
+asr = "asr.cli.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["asr*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

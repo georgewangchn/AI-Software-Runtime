@@ -25,6 +25,14 @@ def cli():
 def run(project, spec, config_path, max_iterations, decoupled, verbose):
     from asr.controller.convergence import ConvergenceState
 
+    # Pre-flight: check opencode availability
+    import shutil as _shutil
+    if not _shutil.which("opencode"):
+        click.echo("ERROR: 'opencode' CLI not found in PATH.")
+        click.echo("Install it:  npm install -g opencode-ai")
+        click.echo("Configure:   asr init --project .  (generates .opencode/config.json template)")
+        raise SystemExit(1)
+
     config = load_config(config_path) if config_path else create_default_config()
     if max_iterations:
         config.convergence.max_iterations = max_iterations
@@ -128,12 +136,179 @@ def init(project):
 
     runtime_dir = project_dir / ".runtime"
     for sub in ["events", "inbox/builder", "inbox/tester", "inbox/analyzer",
-                "tasks", "patches", "diffs", "state"]:
+                "tasks", "patches", "diffs", "state", "logs"]:
         (runtime_dir / sub).mkdir(parents=True, exist_ok=True)
 
+    # Generate example DESIGN.md
+    design_path = project_dir / "DESIGN.md"
+    if not design_path.exists():
+        design_path.write_text(_EXAMPLE_DESIGN_MD)
+
+    # Generate opencode config template
+    opencode_dir = project_dir / ".opencode"
+    opencode_dir.mkdir(exist_ok=True)
+    opencode_config = opencode_dir / "config.json"
+    if not opencode_config.exists():
+        opencode_config.write_text(_EXAMPLE_OPENCODE_CONFIG)
+
     click.echo(f"Initialized ASR project at {project_dir}")
-    click.echo(f"Config: {config_path}")
-    click.echo(f"Runtime: {runtime_dir}")
+    click.echo(f"  Config:       {config_path}")
+    click.echo(f"  Design doc:   {design_path} (edit this to define your project)")
+    click.echo(f"  Runtime:      {runtime_dir}")
+    click.echo(f"  OpenCode:     {opencode_config} (configure your LLM provider here)")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo(f"  1. Edit {design_path} — describe your project")
+    click.echo(f"  2. Edit {opencode_config} — configure your LLM provider/model")
+    click.echo(f"  3. Run:  asr run --project {project}")
+
+
+_EXAMPLE_DESIGN_MD = """\
+# Project Name
+
+## Overview
+Brief description of what this project does.
+
+## Architecture
+Describe the system architecture, module structure, and key design decisions.
+
+## Modules
+
+### module_1
+- **Purpose**: What this module does
+- **Files**: `src/module_1.py`
+- **Key functions**: function_a, function_b
+
+### module_2
+- **Purpose**: What this module does
+- **Files**: `src/module_2.py`
+- **Key functions**: function_c, function_d
+
+## Data Models
+Describe any data structures, schemas, or database tables.
+
+## API Endpoints
+If applicable, list API endpoints and their behavior.
+
+## Constraints
+- Constraint 1
+- Constraint 2
+
+## Testing Strategy
+Describe how the project should be tested.
+"""
+
+_EXAMPLE_OPENCODE_CONFIG = """\
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local LLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "empty"
+      },
+      "models": {
+        "glm-4.7-fp8": {
+          "name": "glm-4.7-fp8",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
+        }
+      }
+    }
+  },
+  "model": "local/glm-4.7-fp8"
+}
+"""
+
+
+@cli.command()
+@click.option("--project", required=True, type=click.Path(exists=True), help="Project directory to diagnose")
+def doctor(project):
+    """Diagnose ASR environment and configuration."""
+    import shutil as _shutil
+    import subprocess as _sp
+
+    project_dir = Path(project).resolve()
+    ok = True
+
+    click.echo("ASR Environment Diagnosis")
+    click.echo("=" * 50)
+
+    # 1. Python version
+    import sys as _sys
+    click.echo(f"Python: {_sys.version.split()[0]} ", nl=False)
+    if _sys.version_info >= (3, 11):
+        click.echo("OK")
+    else:
+        click.echo("FAIL (need >= 3.11)")
+        ok = False
+
+    # 2. opencode CLI
+    click.echo("opencode CLI: ", nl=False)
+    opencode_path = _shutil.which("opencode")
+    if opencode_path:
+        try:
+            ver = _sp.run([opencode_path, "--version"], capture_output=True, text=True, timeout=5)
+            click.echo(f"OK ({ver.stdout.strip()})")
+        except Exception:
+            click.echo(f"OK (at {opencode_path})")
+    else:
+        click.echo("MISSING (npm install -g opencode-ai)")
+        ok = False
+
+    # 3. pytest
+    click.echo("pytest: ", nl=False)
+    pytest_path = _shutil.which("pytest")
+    if pytest_path:
+        click.echo("OK")
+    else:
+        click.echo("MISSING (pip install pytest)")
+        ok = False
+
+    # 4. Project structure
+    design = project_dir / "DESIGN.md"
+    click.echo(f"DESIGN.md: ", nl=False)
+    if design.exists():
+        size = design.stat().st_size
+        click.echo(f"OK ({size} bytes)")
+    else:
+        click.echo("MISSING (asr init --project . to generate)")
+
+    # 5. opencode config
+    oc_config = project_dir / ".opencode" / "config.json"
+    if not oc_config.exists():
+        oc_config = Path.home() / ".config" / "opencode" / "opencode.json"
+    click.echo(f"opencode config: ", nl=False)
+    if oc_config.exists():
+        click.echo(f"OK ({oc_config})")
+    else:
+        click.echo("MISSING (asr init --project . to generate template)")
+
+    # 6. ASR config
+    asr_config = project_dir / "asr_config.yaml"
+    click.echo(f"asr_config.yaml: ", nl=False)
+    if asr_config.exists():
+        click.echo("OK")
+    else:
+        click.echo("not found (will use defaults)")
+
+    # 7. Runtime directories
+    runtime = project_dir / ".runtime"
+    click.echo(f".runtime/: ", nl=False)
+    if runtime.exists():
+        click.echo("OK")
+    else:
+        click.echo("will be auto-created on first run")
+
+    click.echo("=" * 50)
+    if ok:
+        click.echo("All checks passed. Ready to run: asr run --project .")
+    else:
+        click.echo("Some checks failed. Fix the issues above before running.")
 
 
 @cli.command()

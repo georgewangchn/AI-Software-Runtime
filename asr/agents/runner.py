@@ -42,7 +42,7 @@ class AgentRunner:
 
         while self._running:
             try:
-                events = self._agent.poll_inbox()
+                events = await self._agent.poll_inbox()
                 for event in events:
                     if event.event_id not in processed_ids:
                         processed_ids.add(event.event_id)

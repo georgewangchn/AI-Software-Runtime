@@ -54,6 +54,7 @@ class ConvergenceResult:
     iterations: int = 0
     events: list[Event] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
+    metrics_timeline: list[dict] = field(default_factory=list)  # P2-2: structured time-series
 
 
 class ASRController:
@@ -99,6 +100,38 @@ class ASRController:
 
         # ── #3 fix: notify Builder after patch rejection ──
         self._last_patch_rejection: tuple[int, str] | None = None  # (iteration, reason) from last rejected patch
+        self._mode_history: list[tuple[str, int]] = []  # P0-2: track mode transitions for feedforward
+
+    def _finalize_metrics_timeline(self, task_id: str, result: ConvergenceResult) -> None:
+        """P2-2: Export metrics history as structured time-series data."""
+        timeline = []
+        for i, m in enumerate(self._metrics_history):
+            mode_at = self._mode_history[i][0] if i < len(self._mode_history) else self._repair_mode
+            timeline.append({
+                "iteration": m.iteration,
+                "test_pass_rate": round(m.test_pass_rate, 4),
+                "trend": m.trend,
+                "error_score": round(m.error_score, 2),
+                "repair_mode": mode_at,
+                "oscillation_score": round(m.oscillation_score, 3),
+                "sensor_disagreement": m.sensor_disagreement,
+                "test_failed_count": m.test_failed_count,
+                "test_error_count": m.test_error_count,
+                "missing_feature_count": m.missing_feature_count,
+                "patch_count": m.patch_count,
+                "changed_file_count": m.changed_file_count,
+                "rollback_count": m.rollback_count,
+            })
+        result.metrics_timeline = timeline
+        result.summary["metrics_timeline"] = timeline
+        # Write to file for post-hoc analysis
+        import json
+        state_dir = self._project_dir / self._config.runtime.state_dir
+        state_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = state_dir / f"metrics_{task_id}.json"
+        with open(metrics_path, 'w') as f:
+            json.dump(timeline, f, indent=2, ensure_ascii=False)
+        self._logger.log("INFO", f"P2-2: metrics timeline saved to {metrics_path}", "controller")
 
     async def run(self, spec: Specification, task_id: str | None = None,
                   progress_callback=None) -> ConvergenceResult:
@@ -211,6 +244,7 @@ class ASRController:
                 self._convergence_streak = getattr(self, '_convergence_streak', 0) + 1
                 if self._convergence_streak >= 3:  # require 3 consecutive aligned rounds
                     self._emit_converged(task_id, iteration, result)
+                    self._finalize_metrics_timeline(task_id, result)
                     return result
             # N2: FINAL_VERIFICATION — if tests pass but no analyzer ran this round,
             # switch to FINAL_VERIFICATION mode to force a full analysis before converging
@@ -300,7 +334,36 @@ class ASRController:
                     json.dump(snapshot, sf, indent=2, ensure_ascii=False)
                 self._logger.log("INFO", f"Human-in-the-loop: state saved to {snap_path}", "controller")
                 self._emit_stuck(task_id, iteration, "circuit_breaker_no_improvement", test_events, result)
+                self._finalize_metrics_timeline(task_id, result)
                 return result
+
+            # ── P2-1: A/B comparison baseline — immediate rollback on regression ──
+            # If this round's pass_rate is significantly worse than best snapshot,
+            # roll back immediately rather than waiting for REGRESSION_RECOVERY mode.
+            # This prevents regression from polluting the project state for the
+            # next Builder iteration.
+            ab_rollback_msg: str | None = None
+            if (self._best_snapshot and metrics
+                    and metrics.test_pass_rate < self._best_snapshot["test_pass_rate"] - 0.15
+                    and self._best_snapshot.get("files")
+                    and iteration > 1):
+                self._logger.log(
+                    "WARN",
+                    f"P2-1 A/B baseline: pass_rate {metrics.test_pass_rate:.1%} << "
+                    f"best {self._best_snapshot['test_pass_rate']:.1%} — rolling back to best",
+                    "controller"
+                )
+                restored = self._restore_project_files(self._best_snapshot["files"])
+                self._logger.log(
+                    "INFO",
+                    f"P2-1: restored {restored} files to best snapshot (iter {self._best_snapshot['iteration']})",
+                    "controller"
+                )
+                ab_rollback_msg = (
+                    f"[A/B_ROLLBACK] 上一轮修改导致回归(pass_rate {metrics.test_pass_rate:.1%} < "
+                    f"最佳 {self._best_snapshot['test_pass_rate']:.1%})，已回滚到最佳状态。"
+                    f"请基于最佳状态重新修复，不要重复导致回归的修改模式。"
+                )
 
             # Step 4: mode switching (uses metrics.trend based on test_pass_rate)
             self._check_and_switch_mode(metrics, task_id, result)
@@ -366,6 +429,9 @@ class ASRController:
                     error_msg = evt.payload.get("error_message", "")
                     if error_msg:
                         current_feedback.append(f"[ANALYZER_ERROR] {error_msg}")
+            # P2-1: Inject A/B rollback feedback if rollback happened this iteration
+            if ab_rollback_msg:
+                current_feedback.insert(0, ab_rollback_msg)
             if current_feedback:
                 current_feedback[-1] = f"{current_feedback[-1]} (迭代{iteration})"
                 # P4 fix: reduce noise — keep only last 15 items (was 30).
@@ -389,13 +455,36 @@ class ASRController:
             ), result)
 
         self._emit_stuck(task_id, iteration, "max_iterations", [], result)
+        self._finalize_metrics_timeline(task_id, result)
         return result
 
     async def _testing_phase(self, task_id: str) -> list[Event]:
         events: list[Event] = []
+        # P0-1: Compute changed files for incremental testing
+        changed_files: list[str] = []
+        if getattr(self, '_prev_rollback_entries', None):
+            for entry in self._prev_rollback_entries:
+                target = self._project_dir / entry.file_path
+                if target.exists():
+                    try:
+                        current = target.read_text()
+                        if current != entry.original_content:
+                            changed_files.append(entry.file_path)
+                    except (UnicodeDecodeError, OSError):
+                        continue
+        # Also check for new files created by Builder (not in rollback entries)
+        snapshotted_rels = {e.file_path for e in getattr(self, '_prev_rollback_entries', [])}
+        skip_patterns = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache", ".omo")
+        for f in self._project_dir.rglob("*.py"):
+            if any(p in str(f) for p in skip_patterns):
+                continue
+            rel = str(f.relative_to(self._project_dir))
+            if rel not in snapshotted_rels:
+                changed_files.append(rel)
+
         test_started = TestStartedEvent(
             task_id=task_id, from_agent=AgentName.CONTROLLER, to_agent=AgentName.TESTER,
-            payload={"test_paths": [str(self._project_dir)]},
+            payload={"test_paths": [str(self._project_dir)], "changed_files": changed_files},
         )
         if self._tester:
             result_events = await self._invoke_agent(self._tester, test_started, task_id, "testing")
@@ -461,6 +550,79 @@ class ASRController:
                 if evt.event_id not in {e.event_id for e in events}:
                     events.append(evt)
         return events
+
+    def _get_adaptive_limits(self) -> tuple[int, int]:
+        """P1-2: Dynamically adjust patch amplitude limits based on system state.
+
+        Control theory: variable step size — large steps during initial convergence,
+        small steps near the target to prevent overshoot.
+        """
+        cfg = self._config.convergence
+        if not getattr(cfg, 'adaptive_limits', True):
+            return cfg.max_files_per_patch, cfg.max_lines_per_patch
+
+        base_files = cfg.max_files_per_patch
+        base_lines = cfg.max_lines_per_patch
+
+        if self._repair_mode == "OSCILLATION_BREAK":
+            # Force tiny steps to break the oscillation cycle
+            return max(2, base_files // 3), max(30, base_lines // 3)
+        elif self._repair_mode == "REGRESSION_RECOVERY":
+            # Very conservative — just recovered from a regression
+            return max(1, base_files // 4), max(15, base_lines // 4)
+        elif self._improving_streak >= 2:
+            # Builder is on the right track — let it move faster
+            return int(base_files * 1.5), int(base_lines * 1.5)
+        elif self._stalled_streak >= 2:
+            # Stalled — force smaller, more focused patches
+            return max(3, base_files // 2), max(50, base_lines // 2)
+        return base_files, base_lines
+
+    def _build_builder_context(self) -> str:
+        """P0-2: Build feedforward context for Builder — system state Builder can't see.
+
+        Control theory: feedforward compensates before disturbance reaches the plant.
+        Builder session resets cause 'amnesia' — this context prevents repeating
+        known-bad modification patterns.
+        """
+        parts: list[str] = []
+        # 1. Pass rate trajectory (last 5 rounds)
+        if len(self._pass_rate_history) >= 2:
+            trajectory = [f"{r:.1%}" for r in self._pass_rate_history[-5:]]
+            parts.append(f"[TRAJECTORY] pass_rate 近{len(trajectory)}轮: {' → '.join(trajectory)}")
+        # 2. Mode transition history
+        if self._mode_history and len(self._mode_history) >= 2:
+            recent_modes = [m for m, _ in self._mode_history[-3:]]
+            parts.append(f"[MODE_HISTORY] {' → '.join(recent_modes)}")
+        # 3. Repeated failure warning
+        if len(self._failure_fingerprints) >= 2:
+            current_fp = self._failure_fingerprints[-1]
+            if current_fp != "none":
+                repeat_count = sum(1 for fp in self._failure_fingerprints[:-1] if fp == current_fp)
+                if repeat_count >= 2:
+                    parts.append(
+                        f"[REPEATED_FAILURE] 相同测试失败已出现 {repeat_count + 1} 次，"
+                        f"需要换策略——不要重复之前的修改模式"
+                    )
+        # 4. Best snapshot info
+        if self._best_snapshot:
+            parts.append(
+                f"[BEST_STATE] 最佳状态: iter={self._best_snapshot['iteration']}, "
+                f"pass_rate={self._best_snapshot['test_pass_rate']:.1%}"
+            )
+        # 5. Current trend and streaks
+        if self._pass_rate_history:
+            trend = self._trend_history[-1] if self._trend_history else "unknown"
+            streaks = []
+            if self._improving_streak > 0:
+                streaks.append(f"improving×{self._improving_streak}")
+            if self._stalled_streak > 0:
+                streaks.append(f"stalled×{self._stalled_streak}")
+            if self._regressing_streak > 0:
+                streaks.append(f"regressing×{self._regressing_streak}")
+            if streaks:
+                parts.append(f"[TREND] {trend} ({', '.join(streaks)})")
+        return "\n".join(parts) if parts else ""
 
     async def _repairing_phase(
         self, task_id: str, failures: list[dict], feedback: list[str]
@@ -535,6 +697,17 @@ class ASRController:
               f"top_dirs={[str(d) for d in py_dirs[:8]]}", file=_sys.stderr)
 
         if self._builder:
+            # P3 fix: FINAL_VERIFICATION doesn't need Builder — skip the LLM call
+            # entirely to save tokens and time. The purpose of this mode is to
+            # force the Analyzer to run, not to modify code.
+            if self._repair_mode == "FINAL_VERIFICATION":
+                self._logger.log(
+                    "INFO",
+                    "FINAL_VERIFICATION: skipping Builder call (no code changes needed)",
+                    "controller"
+                )
+                return events  # empty list — no patch generated
+
             skip_patterns = ("__pycache__", ".asr_sandbox", ".git/", ".runtime", ".pytest_cache")
             for f in self._project_dir.rglob("*"):
                 if f.is_dir():
@@ -553,6 +726,12 @@ class ASRController:
             # ── RepairMode: modify payload based on current mode ──
             mode_failures = list(failures)
             mode_feedback = list(feedback)
+
+            # P0-2: Inject feedforward context as the FIRST feedback item
+            # so Builder sees system state before any repair instructions.
+            builder_context = self._build_builder_context()
+            if builder_context:
+                mode_feedback.insert(0, builder_context)
 
             if self._repair_mode == "COMPILE_FIX":
                 # Only pass compile errors (TEST_ERROR), filter out test failures
@@ -650,12 +829,14 @@ class ASRController:
                 summary = _compute_diff_summary(diff_text)
 
                 # ── Hard patch amplitude enforcement (Phase3 fix) ──
+                # P1-2: Use adaptive limits instead of static config values
                 cfg = self._config.convergence
                 allow_large = cfg.allow_large_patch_in_initial and getattr(self, "_current_iteration", 0) <= 1
                 hard_reject = getattr(cfg, 'hard_reject_oversized_patch', True)
+                adaptive_files, adaptive_lines = self._get_adaptive_limits()
                 if (not allow_large) and hard_reject:
-                    if (summary.get("files", 0) > cfg.max_files_per_patch
-                            or (summary.get("added", 0) + summary.get("removed", 0)) > cfg.max_lines_per_patch):
+                    if (summary.get("files", 0) > adaptive_files
+                            or (summary.get("added", 0) + summary.get("removed", 0)) > adaptive_lines):
                         # Patch too large — reject and roll back
                         reject_evt = PatchFailedEvent(
                             task_id=task_id, from_agent=AgentName.CONTROLLER,
@@ -666,8 +847,9 @@ class ASRController:
                                     f"[PATCH_REJECTED] Patch too large: "
                                     f"{summary.get('files', 0)} files, "
                                     f"{summary.get('added', 0) + summary.get('removed', 0)} lines. "
-                                    f"Limit: {cfg.max_files_per_patch} files, "
-                                    f"{cfg.max_lines_per_patch} lines. "
+                                    f"Limit: {adaptive_files} files, "
+                                    f"{adaptive_lines} lines "
+                                    f"(mode={self._repair_mode}). "
                                     f"Please make a smaller, focused patch."
                                 ),
                                 "failed_hunk": None,
@@ -680,7 +862,8 @@ class ASRController:
                             self._current_iteration,
                             f"[PATCH_REJECTED] Patch too large: "
                             f"{summary.get('files', 0)} files, "
-                            f"{summary.get('added', 0) + summary.get('removed', 0)} lines."
+                            f"{summary.get('added', 0) + summary.get('removed', 0)} lines. "
+                            f"(adaptive limit: {adaptive_files}f/{adaptive_lines}l, mode={self._repair_mode})"
                         )
                         # Roll back changes
                         snapshotted_map = {e.file_path: e.original_content for e in self._rollback_entries}
@@ -921,6 +1104,22 @@ class ASRController:
         return {"total": total, "passed": passed, "failed": failed, "failures": failures}
 
 
+    def _compute_sensor_agreement(self, test_pass_rate: float,
+                                   missing_feature_count: int,
+                                   analysis_aligned: bool) -> str:
+        """P1-1: Cross-validate ground-truth sensor (test_pass_rate) vs noise sensor (Analyzer).
+
+        When the two sensors disagree, the controller needs arbitration logic:
+        - INCOMPLETE_TESTS: tests pass but features missing → tests don't cover the gap
+        - TEST_QUALITY_ISSUE: tests fail badly but Analyzer says all clear → test quality suspect
+        - AGREED: both sensors tell the same story
+        """
+        if test_pass_rate >= 1.0 and missing_feature_count > 0:
+            return "INCOMPLETE_TESTS"
+        if test_pass_rate < 0.5 and analysis_aligned:
+            return "TEST_QUALITY_ISSUE"
+        return "AGREED"
+
     # ── Control-Theoretic Metrics (Phase 1) ──
 
     def _compute_metrics(self, iteration: int,
@@ -1032,8 +1231,13 @@ class ASRController:
         )
 
         # ── Trend: based on test_pass_rate (ground truth), NOT error_score ──
+        # P0 fix: trend was "unknown" for the first 2 iterations because
+        # _pass_rate_history was empty on iter 1 and had 1 element on iter 2.
+        # This meant all control logic (mode switching, circuit breaker)
+        # was inactive for small max_iterations (e.g. 3).
+        # Fix: use len >= 1 (compare current vs last known) instead of >= 2.
         trend = "unknown"
-        if len(self._pass_rate_history) >= 2:
+        if len(self._pass_rate_history) >= 1:
             prev_rate = self._pass_rate_history[-1]
             delta = test_pass_rate - prev_rate
             if delta > 0.05:
@@ -1043,10 +1247,27 @@ class ASRController:
             else:
                 trend = "stalled"
                 # Check for oscillation pattern in pass rate history
-                if len(self._pass_rate_history) >= 4:
-                    r = self._pass_rate_history[-4:]
+                if len(self._pass_rate_history) >= 3:
+                    r = self._pass_rate_history[-3:] + [test_pass_rate]
                     if (r[0] < r[1] > r[2] < r[3]) or (r[0] > r[1] < r[2] > r[3]):
                         trend = "oscillating"
+
+        # P1-1: Compute sensor disagreement for cross-validation
+        analysis_aligned = (
+            missing_feature_count == 0 and logic_issue_count == 0
+            and constraint_violation_count == 0 and high_severity_count == 0
+        )
+        sensor_disagreement = self._compute_sensor_agreement(
+            test_pass_rate, missing_feature_count, analysis_aligned
+        )
+        if sensor_disagreement != "AGREED":
+            self._logger.log(
+                "WARN",
+                f"Sensor disagreement: {sensor_disagreement} "
+                f"(pass_rate={test_pass_rate:.1%}, missing={missing_feature_count}, "
+                f"aligned={analysis_aligned})",
+                "controller"
+            )
 
         metrics = ConvergenceMetrics(
             iteration=iteration,
@@ -1065,6 +1286,7 @@ class ASRController:
             test_pass_rate=test_pass_rate,
             error_score=error_score,
             trend=trend,
+            sensor_disagreement=sensor_disagreement,
         )
 
         self._metrics_history.append(metrics)
@@ -1345,9 +1567,12 @@ def _compute_diff_summary(diff_text: str) -> dict:
     removed = sum(1 for l in lines if l.startswith("-") and not l.startswith("---"))
     files_touched = max(1, len([l for l in lines if l.startswith("--- a/") or l.startswith("+++ b/")]))
     bypass_detected = any(p in diff_text for p in [
-        "except:", "pass", "if DEBUG:", "return expected",
+        "except:", "if DEBUG:", "return expected",
         "mock(", "@pytest.mark.skip",
-    ])
+    ]) or any(
+        line.strip().startswith("+") and line[1:].strip() == "pass"
+        for line in lines
+    )
     risk_score = min(100, added * 2 + removed * 3 + files_touched * 10 + (25 if bypass_detected else 0))
     return {
         "files": files_touched,

@@ -121,7 +121,9 @@ class TestLogTokenUsage:
         log_file = Path(".runtime/logs/llm.jsonl")
         assert log_file.exists()
 
-        entry = json.loads(log_file.read_text().strip())
+        # llm.jsonl is append-only, so read the last line
+        lines = log_file.read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
         assert entry["agent"] == "builder"
 
         if log_file.exists():

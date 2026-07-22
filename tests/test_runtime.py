@@ -48,13 +48,13 @@ class TestASRRuntime:
 
     def test_runtime_default_config(self):
         """Test ASRRuntime with default config."""
-        runtime = ASRRuntime()
+        runtime = ASRRuntime(ASRConfig())
         assert runtime._config is not None
         assert isinstance(runtime._config, ASRConfig)
 
     def test_runtime_design_title_with_design_md(self, temp_project_dir):
         """Test _design_title extracts title from DESIGN.md."""
-        runtime = ASRRuntime()
+        runtime = ASRRuntime(ASRConfig())
         title = runtime._design_title(temp_project_dir)
         assert "Design" in title
 
@@ -62,7 +62,7 @@ class TestASRRuntime:
         """Test _design_title without DESIGN.md returns default."""
         for md_file in temp_project_dir.glob("*.md"):
             md_file.unlink()
-        runtime = ASRRuntime()
+        runtime = ASRRuntime(ASRConfig())
         title = runtime._design_title(temp_project_dir)
         assert "Build system per design document" in title
 
@@ -119,7 +119,9 @@ class TestASRRuntime:
             iterations=1
         )) as mock_execute:
             result = await runtime.run(temp_project_dir, None, progress_callback=callback_mock)
-            callback_arg = mock_execute.call_args[1].get('progress_callback')
+            assert mock_execute.called
+            # progress_callback is passed as positional arg (4th)
+            callback_arg = mock_execute.call_args[0][3] if len(mock_execute.call_args[0]) > 3 else None
             assert callback_arg == callback_mock
 
     @pytest.mark.asyncio
@@ -229,9 +231,19 @@ class TestASRRuntime:
             mock_dag.total_iterations = 1
             mock_dag.node_results = {}
 
-            result = await runtime.run_dag(temp_project_dir, spec_path)
-            assert result.total_nodes == 1
-            assert result.converged == 1
+            with patch('asr.runtime.DAGExecutor') as mock_executor:
+                mock_result = MagicMock()
+                mock_result.total_nodes = 1
+                mock_result.converged = 1
+                mock_result.stuck = 0
+                mock_result.skipped = 0
+                mock_result.total_iterations = 1
+                mock_result.node_results = {}
+                mock_executor.return_value.execute = AsyncMock(return_value=mock_result)
+
+                result = await runtime.run_dag(temp_project_dir, spec_path)
+                assert result.total_nodes == 1
+                assert result.converged == 1
 
     @pytest.mark.asyncio
     async def test_runtime_run_dag_with_mode(self, minimal_config, spec_path, temp_project_dir):
@@ -254,9 +266,19 @@ class TestASRRuntime:
             mock_dag.total_iterations = 1
             mock_dag.node_results = {}
 
-            result = await runtime.run_dag(temp_project_dir, spec_path, mode="features")
-            assert result.total_nodes == 1
-            assert result.converged == 1
+            with patch('asr.runtime.DAGExecutor') as mock_executor:
+                mock_result = MagicMock()
+                mock_result.total_nodes = 1
+                mock_result.converged = 1
+                mock_result.stuck = 0
+                mock_result.skipped = 0
+                mock_result.total_iterations = 1
+                mock_result.node_results = {}
+                mock_executor.return_value.execute = AsyncMock(return_value=mock_result)
+
+                result = await runtime.run_dag(temp_project_dir, spec_path, mode="features")
+                assert result.total_nodes == 1
+                assert result.converged == 1
 
     @pytest.mark.asyncio
     async def test_runtime_convergence_config_validation(self, temp_project_dir):
@@ -269,13 +291,17 @@ class TestASRRuntime:
     @pytest.mark.asyncio
     async def test_runtime_runtime_config_paths(self, temp_project_dir):
         """Test runtime with custom runtime config paths."""
-        config = ASRConfig(
-            runtime=type('RuntimeConfig', (), {
-                'event_dir': '/custom/events',
-                'inbox_dir': '/custom/inbox',
-                'patch_dir': '/custom/patches',
-                'state_dir': '/custom/state'
-            })()
-        )
-        runtime = ASRRuntime(config, temp_project_dir)
-        assert runtime._event_store is not None
+        from asr.config.models import RuntimeConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ASRConfig(
+                runtime=RuntimeConfig(
+                    event_dir=f'{tmpdir}/events',
+                    inbox_dir=f'{tmpdir}/inbox',
+                    patch_dir=f'{tmpdir}/patches',
+                    diff_dir=f'{tmpdir}/diffs',
+                    state_dir=f'{tmpdir}/state',
+                    task_dir=f'{tmpdir}/tasks',
+                )
+            )
+            runtime = ASRRuntime(config)
+            assert runtime._event_store is not None

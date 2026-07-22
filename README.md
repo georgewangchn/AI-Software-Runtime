@@ -95,86 +95,85 @@ DESIGN.md（规格文档）
 
 ## 快速开始
 
-### 1. 安装 pyenv 和 Python
+### 1. 安装 ASR
 
 ```bash
-# macOS
-brew install pyenv
-
-# 配置 shell（~/.zshrc 或 ~/.bashrc）
-echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.zshrc
-echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.zshrc
-echo 'eval "$(pyenv init -)"' >> ~/.zshrc
-source ~/.zshrc
-
-# 安装 Python 3.12.9
-pyenv install 3.12.9
-```
-
-### 2. 克隆项目并配置环境
-
-```bash
-git clone https://github.com/your-username/asr.git
-cd asr
-
-# 设置 Python 版本
-pyenv local 3.12.9
+git clone https://github.com/georgewangchn/AI-Software-Runtime.git
+cd AI-Software-Runtime
 
 # 创建虚拟环境
 python -m venv .venv
 source .venv/bin/activate
 
-# 安装依赖
-pip install -r requirements.txt
+# 安装 ASR（含 CLI 入口）
+pip install -e .
 ```
 
-### 3. 配置 LLM
+### 2. 安装 opencode CLI
+
+ASR 通过 [opencode](https://opencode.ai) CLI 调用 LLM，需要先安装并配置：
 
 ```bash
-# 复制配置模板
-cp .env.example .env
+# 安装 opencode
+npm install -g opencode-ai
 
-# 编辑 .env，填入你的 LLM 接口地址和 API Key
-# 支持任意 OpenAI 兼容接口（vLLM / Ollama / OpenAI 官方等）
+# 验证安装
+opencode --version
 ```
 
-`.env` 配置示例（详见 `.env.example`）：
-
-```ini
-FEASIBILITY_LLM_API_BASE=http://localhost:8000/v1
-FEASIBILITY_LLM_API_KEY=your-api-key
-FEASIBILITY_LLM_MODEL=your-model-name
-FEASIBILITY_LLM_CONTEXT=131072
-```
-
-### 4. 准备设计文档（DESIGN.md）
-
-`DESIGN.md` 是 ASR 的**规格输入**，描述你想要生成的软件系统的设计需求，包括：
-
-- 功能需求（模块、接口、数据结构）
-- 架构约束（分层设计、依赖关系）
-- 测试要求（单测覆盖率、集成测试）
-
-> **关于 DESIGN.md**：每个项目需要自己编写 DESIGN.md，描述待生成软件的规格。这是 ASR 的核心输入，决定了最终生成代码的功能和结构。你可以参考 [AI Software Runtime(ASR)技术报告](./AI%20Software%20Runtime(ASR)技术报告.md) 中的案例了解规格文档的写法。
-
-### 5. 运行 ASR
+### 3. 初始化项目
 
 ```bash
-# 创建项目目录，放入 DESIGN.md
-mkdir -p my_project
-cp /path/to/your/DESIGN.md my_project/DESIGN.md
+# 创建新项目（自动生成 DESIGN.md 模板 + opencode 配置模板）
+asr init --project my_project
 
-# 运行 ASR（最多迭代 20 轮）
-python -m asr.cli.main run --project my_project --max-iterations 20
+# 编辑 DESIGN.md 描述你的项目设计
+# 编辑 .opencode/config.json 配置你的 LLM provider
 ```
 
-或复制并修改启动脚本：
+### 4. 配置 LLM
+
+编辑 `my_project/.opencode/config.json`，配置你的 LLM provider：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local LLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "empty"
+      },
+      "models": {
+        "glm-4.7-fp8": {
+          "name": "glm-4.7-fp8",
+          "limit": { "context": 262144, "output": 32768 }
+        }
+      }
+    }
+  },
+  "model": "local/glm-4.7-fp8"
+}
+```
+
+支持任意 OpenAI 兼容接口（vLLM / Ollama / OpenAI 官方 / DeepSeek 等）。
+
+### 5. 环境检查
 
 ```bash
-cp start.sh my_start.sh
-# 编辑 my_start.sh 中的路径和参数
-bash my_start.sh
+asr doctor --project my_project
 ```
+
+### 6. 运行 ASR
+
+```bash
+# 自动生成代码并收敛（最多迭代 20 轮）
+asr run --project my_project --max-iterations 20
+```
+
+ASR 会自动：Builder 生成代码 → Tester 验证 → Analyzer 对比规格 → 循环修复直到收敛。
 
 **运行时输出示例**：
 

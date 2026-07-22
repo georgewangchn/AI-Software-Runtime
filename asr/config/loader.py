@@ -54,6 +54,16 @@ def load_config(path: str | Path) -> ASRConfig:
 
 
 def create_default_config() -> ASRConfig:
+    """Create default ASR configuration.
+
+    NOTE: ASR delegates all LLM calls to the `opencode` CLI.
+    The model/api_base/api_key fields below are for reference only —
+    the actual LLM provider is configured in opencode's config file
+    (.opencode/config.json in the project root, or
+    ~/.config/opencode/opencode.json globally).
+
+    Run `asr init --project .` to generate an opencode config template.
+    """
     dotenv = _load_dotenv()
 
     model_name = dotenv.get("FEASIBILITY_LLM_MODEL", "openai/glm-4.7-fp8")

@@ -167,6 +167,7 @@ class TesterAgent(BaseAgent):
         super().__init__(name=AgentName.TESTER, event_store=event_store)
         self._config = config
         self._project_dir = project_dir
+        self._test_call_count = 0  # P0-1: track test invocations for periodic full runs
 
     async def process(self, event: Event) -> list[Event]:
         if not self.validate_event(event):
@@ -182,6 +183,41 @@ class TesterAgent(BaseAgent):
                          "error_message": str(e), "retry_hint": "retryable"},
             )]
         return []
+
+    def _compute_affected_tests(self, changed_files: list[str], sandbox: Path) -> list[str]:
+        """P0-1: Based on changed source files, infer which test files to run.
+
+        Uses import dependency scanning to find tests that import changed modules.
+        Returns empty list if no affected tests found → caller should run full suite.
+        """
+        if not changed_files:
+            return []
+        affected = set()
+        tests_dir = sandbox / "tests"
+        if not tests_dir.exists():
+            return []
+
+        all_test_files = list(tests_dir.rglob("test_*.py"))
+        for changed in changed_files:
+            stem = Path(changed).stem
+            # Direct correspondence: src/auth.py → tests/test_auth.py
+            direct_test = tests_dir / f"test_{stem}.py"
+            if direct_test.exists():
+                affected.add(str(direct_test))
+            # Import dependency: scan test files for imports of the changed module
+            module_path = changed.replace("/", ".").replace(".py", "")
+            module_name = stem
+            for test_file in all_test_files:
+                if str(test_file) in affected:
+                    continue
+                try:
+                    content = test_file.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                # Check if test imports the changed module by name or path
+                if module_name in content or module_path in content:
+                    affected.add(str(test_file))
+        return list(affected)
 
     async def _handle_test_started(self, event: Event) -> list[Event]:
         sandbox = self._project_dir / ".asr_sandbox" / "tester"
@@ -268,10 +304,38 @@ class TesterAgent(BaseAgent):
             except (subprocess.TimeoutExpired, Exception):
                 pass
 
+        # P0-1: Incremental testing — run only affected tests, with periodic full runs
+        self._test_call_count += 1
+        incremental_interval = getattr(self._config, 'incremental_test_interval', 3) \
+            if hasattr(self._config, 'incremental_test_interval') else 3
+        # Also check convergence config
+        if not hasattr(self, '_incremental_interval'):
+            _conv_cfg = getattr(self._config, 'convergence', None)
+            self._incremental_interval = getattr(_conv_cfg, 'incremental_test_interval', 3) \
+                if _conv_cfg else 3
+
+        run_full = (self._test_call_count % self._incremental_interval == 0)
+        test_targets = [str(sandbox)]
+        if not run_full:
+            # Extract changed files from the event payload (if controller provided them)
+            changed_files = event.payload.get("changed_files", [])
+            if changed_files:
+                affected = self._compute_affected_tests(changed_files, sandbox)
+                if affected:
+                    test_targets = affected
+                    print(f"[tester] P0-1 incremental: running {len(affected)} affected test files "
+                          f"(call #{self._test_call_count})", file=sys.stderr)
+                else:
+                    print(f"[tester] P0-1: no affected tests found, running full suite", file=sys.stderr)
+            else:
+                print(f"[tester] P0-1: no changed_files in payload, running full suite", file=sys.stderr)
+        else:
+            print(f"[tester] P0-1: periodic full test run (call #{self._test_call_count})", file=sys.stderr)
+
         # Run pytest with text output (no --json-report dependency)
         try:
             result = subprocess.run(
-                ["pytest", "-v", "--tb=short", str(sandbox)],
+                ["pytest", "-v", "--tb=short"] + test_targets,
                 capture_output=True, text=True, timeout=600, cwd=str(sandbox),
             )
         except subprocess.TimeoutExpired:
