@@ -81,13 +81,12 @@
 ## 🏗️ 工作原理
 
 ```mermaid
-flowchart TD
+flowchart LR
     D["📋 DESIGN.md<br/>规格文档"] --> RT
 
     subgraph RT["⚙️ ASR 收敛运行时"]
-        direction TB
-        B["🔧 Builder<br/>生成 / 修复"] --> T["🧪 Tester<br/>运行测试"]
-        T --> A["🔍 Analyzer<br/>对比规格"]
+        direction LR
+        B["🔧 Builder<br/>生成 / 修复"] --> T["🧪 Tester<br/>运行测试"] --> A["🔍 Analyzer<br/>对比规格"]
         A -->|仍有偏差| B
     end
 
