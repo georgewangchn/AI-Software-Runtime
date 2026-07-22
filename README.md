@@ -21,7 +21,7 @@
 
 <br>
 
-[🚀 快速开始](#-快速开始) · [📖 技术报告](./AI%20Software%20Runtime(ASR)技术报告.md) · [🌐 在线演示](https://georgewangchn.github.io/AI-Software-Runtime/)
+[🚀 快速开始](#-快速开始) · [📖 技术报告](./AI%20Software%20runtime%28ASR%29技术报告.md) · [🌐 在线演示](https://georgewangchn.github.io/AI-Software-Runtime/)
 
 <br>
 
@@ -293,7 +293,7 @@ asr/
 
 | 文档 | 说明 |
 |---|---|
-| 📖 [技术报告 (v2.0)](./AI%20Software%20Runtime(ASR)技术报告.md) | 系统架构设计、控制论优化体系、端到端验证、DAG 调度、事件总线 |
+| 📖 [技术报告 (v2.0)](./AI%20Software%20runtime%28ASR%29技术报告.md) | 系统架构设计、控制论优化体系、端到端验证、DAG 调度、事件总线 |
 | 💡 [原始构想](./Supervise-Agent：有监督长任务自动化软件工程系统.md) | 项目最初想法：分层裁决 + 多Agent协同 + 工程约束 |
 | 🌐 [在线演示](https://georgewangchn.github.io/AI-Software-Runtime/) | 系统效果验证测试报告，对比四种方案的实际生成效果 |
 
