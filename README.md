@@ -38,43 +38,41 @@
 
 ## ✨ 核心特性
 
-```
-目标（DESIGN.md）──▶ 控制器（ASRController）──▶ 执行器（Builder / LLM）──▶ 被控对象（代码）
-                                                                              │
-                        反馈 ◀── 传感器（Tester pytest + Analyzer 语义）◀──────┘
-```
+ASR 本质是一个**控制论闭环**——把 LLM 当执行器，用反馈驱动它稳定收敛：
 
-<table>
-<tr>
-<td width="50%" valign="top">
+```mermaid
+flowchart LR
+    G["🎯 目标<br/>DESIGN.md"] --> CTRL["🧠 控制器<br/>ASRController"]
+    CTRL --> ACT["🔧 执行器<br/>Builder / LLM"]
+    ACT --> PLANT["📦 被控对象<br/>代码"]
+    PLANT --> SENSE["📡 传感器<br/>Tester + Analyzer"]
+    SENSE -.反馈.-> CTRL
+
+    style G fill:#ddf4ff,stroke:#54aeff
+    style PLANT fill:#dafbe1,stroke:#4ac26b
+    style SENSE fill:#fff8c5,stroke:#d4a72c
+```
 
 ### 🔒 五重控制论保障
 
-| 要求 | 实现机制 |
-|:---:|---|
-| **反馈可靠** | `test_pass_rate` 地面真值，Analyzer 降级为辅助 |
-| **执行器约束** | RepairMode 状态机（6 模式）+ Patch 限幅 + Formal Guards |
-| **系统稳定** | 振荡检测 + Circuit Breaker + 退化回滚 + Hysteresis 防抖 |
-| **可观测** | ConvergenceMetrics（15+ 字段）+ 全事件文件化 + 可回放 |
-| **可控制** | RepairMode 自动切换 + FINAL_VERIFICATION 防假收敛 |
-
-</td>
-<td width="50%" valign="top">
+| 控制论要求 | ASR 实现机制 |
+|:---|:---|
+| 🎯 **反馈可靠** | `test_pass_rate` 作为地面真值，Analyzer 语义信号降级为辅助 |
+| 🔧 **执行器可约束** | RepairMode 状态机（6 模式）+ Patch 限幅 + Formal Guards 硬约束 |
+| ⚖️ **系统稳定** | 振荡检测（三重指纹）+ Circuit Breaker + 退化回滚 + Hysteresis 防抖 |
+| 📡 **可观测** | ConvergenceMetrics（15+ 字段）+ 全事件文件化存储 + 可回放 |
+| 🎛️ **可控制** | RepairMode 自动切换 + FINAL_VERIFICATION 防假收敛 + Failure Fingerprint |
 
 ### 🚀 v2.0 新增优化
 
-| 优化 | 效果 |
-|---|---|
-| **增量测试** | 反馈延迟从 O(全量) → O(子集)，每 3 轮全量校准 |
-| **前馈控制** | Builder 不再"失忆"重复错误修改模式 |
-| **双传感器仲裁** | test_pass 与 Analyzer 分歧时触发，防假收敛 |
-| **自适应限幅** | 振荡收紧 1/3，improving 放宽 1.5x |
-| **A/B 回滚** | 回归 >15% 立即回滚，不等 mode 切换 |
-| **可观测导出** | metrics_timeline 时序 JSON，事后可分析 |
-
-</td>
-</tr>
-</table>
+| 优化项 | 核心机制 | 效果 |
+|:---|:---|:---|
+| **增量测试** | 基于 diff + import 依赖图只跑受影响测试 | 反馈延迟 O(全量) → O(子集)，每 3 轮全量校准 |
+| **前馈控制** | session reset 后注入结构化 context | Builder 不再"失忆"重复错误修改模式 |
+| **双传感器仲裁** | test_pass 与 Analyzer 分歧时触发仲裁 | 防止假收敛逃逸 |
+| **自适应限幅** | patch 限幅按 trend / mode 动态调整 | 振荡收紧 1/3，improving 放宽 1.5x |
+| **A/B 回滚** | 回归 >15% 立即回滚至 best snapshot | 即时止损，不等 mode 切换 |
+| **可观测导出** | metrics_timeline 导出为时序 JSON | 收敛轨迹事后可分析 |
 
 ---
 
