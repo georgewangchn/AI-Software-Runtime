@@ -80,30 +80,30 @@
 
 ## 🏗️ 工作原理
 
+```mermaid
+flowchart TD
+    D["📋 DESIGN.md<br/>规格文档"] --> RT
+
+    subgraph RT["⚙️ ASR 收敛运行时"]
+        direction TB
+        B["🔧 Builder<br/>生成 / 修复"] --> T["🧪 Tester<br/>运行测试"]
+        T --> A["🔍 Analyzer<br/>对比规格"]
+        A -->|仍有偏差| B
+    end
+
+    A -->|规格对齐| C{"✅ 收敛?"}
+    C -->|否| B
+    C -->|是| O["📦 完整工程项目<br/>测试全通过 · 规格一致"]
+
+    style D fill:#ddf4ff,stroke:#54aeff,stroke-width:1.5px
+    style O fill:#dafbe1,stroke:#4ac26b,stroke-width:1.5px
+    style C fill:#fff8c5,stroke:#d4a72c
+    style RT fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px,color:#24292f
 ```
-                    DESIGN.md（规格文档）
-                          │
-                          ▼
-          ┌───────────────────────────────────────┐
-          │           ASR 收敛运行时                │
-          │                                       │
-          │   ① REPAIRING → ② TESTING → ③ ANALYZING │
-          │      Builder      Tester      Analyzer  │
-          │      生成/修复    pytest验证   语义对比   │
-          │        ▲            │            │     │
-          │        │      退化检测        对齐?     │
-          │        │      _best_snapshot     │     │
-          │        └── 修复指令 ←──┴── CONVERGED   │
-          │                                       │
-          │   ④ 控制论决策（每轮执行）              │
-          │      ConvergenceMetrics → trend        │
-          │      Circuit Breaker → 无改善则停      │
-          │      RepairMode → hysteresis 切换     │
-          └───────────────────────────────────────┘
-                          │
-                          ▼
-              完整工程项目（含测试、文档）
-```
+
+> 每轮循环由控制论引擎驱动：实时计算 `test_pass_rate` 趋势、检测振荡、自动切换 RepairMode，确保系统稳定收敛而非无限振荡。
+
+
 
 <details>
 <summary><b>📋 RepairMode 状态机（点击展开）</b></summary>
