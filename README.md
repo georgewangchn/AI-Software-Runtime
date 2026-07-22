@@ -1,118 +1,158 @@
 <div align="center">
 
-# ASR — AI Software Runtime
+<br>
 
-**基于控制论的自治式 AI 软件工程收敛运行时**
+# ⚙️ ASR — AI Software Runtime
+
+### 基于控制论的自治式 AI 软件工程收敛运行时
+
+<br>
+
+从一份 `DESIGN.md` 出发，自动生成完整工程项目代码，<br>
+通过 Builder → Tester → Analyzer 闭环迭代，持续收敛直到测试全通过且规格对齐。
+
+<br>
 
 [![Version](https://img.shields.io/badge/version-2.0-4CAF50?style=flat-square)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](#)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](#)
 [![Tests](https://img.shields.io/badge/tests-226%20passed-brightgreen?style=flat-square)](#)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#)
 
-[在线演示](https://georgewangchn.github.io/AI-Software-Runtime/) · [技术报告](./AI%20Software%20Runtime(ASR)技术报告.md) · [快速开始](#快速开始)
+<br>
+
+[🚀 快速开始](#-快速开始) · [📖 技术报告](./AI%20Software%20Runtime(ASR)技术报告.md) · [🌐 在线演示](https://georgewangchn.github.io/AI-Software-Runtime/)
+
+<br>
 
 </div>
 
 ---
 
-## 核心理念
-
+> ### 💡 核心理念
 > **一个弱模型 + 强约束系统 > 一个强模型 + 无约束系统**
-
-ASR 把 LLM 当作执行器（不可控、有随机性），用**控制论闭环**驱动它稳定收敛到目标状态——不需要 Claude，不需要 GPT 配额，用任意 OpenAI 兼容接口即可运行。
-
-```
-目标（DESIGN.md）→ 控制器（ASRController）→ 执行器（Builder/LLM）→ 被控对象（代码）
-                                                                        ↓
-                                    反馈 ← 传感器（Tester pytest + Analyzer 语义）
-```
-
-### 控制论五要求 → ASR 实现
-
-| 控制论要求 | ASR 实现 |
-|:---:|---|
-| **反馈信号可靠** | `test_pass_rate` 地面真值（pytest 客观结果），Analyzer 噪声信号降级为辅助 |
-| **执行器可约束** | RepairMode 状态机（6 模式）+ Patch 限幅 + Formal Guards（测试删除/语法检查/Bypass 检测） |
-| **系统稳定** | 振荡检测（三重指纹）+ Circuit Breaker + 退化回滚（_best_snapshot）+ Hysteresis 防抖 |
-| **可观测** | ConvergenceMetrics（15+ 字段）+ 全事件文件化存储 + metrics_timeline 可回放 |
-| **可控制** | RepairMode 自动切换 + FINAL_VERIFICATION 防假收敛 + Failure Fingerprint |
-
-### v2.0 新增控制论优化
-
-| 优化 | 原理 | 效果 |
-|---|---|---|
-| **P0-1 增量测试** | 基于 diff + import 依赖图只跑受影响测试 | 反馈延迟从 O(全量) 降到 O(子集)，每 3 轮全量校准 |
-| **P0-2 前馈控制** | Builder session reset 后注入结构化 context | 执行器不再"失忆"重复错误修改模式 |
-| **P1-1 双传感器仲裁** | test_pass 与 Analyzer 分歧时触发仲裁 | 防止假收敛逃逸 |
-| **P1-2 自适应限幅** | patch 限幅按 trend/mode 动态调整 | 振荡时收紧 1/3，improving 时放宽 1.5x |
-| **P2-1 A/B 回滚** | 回归 >15% 立即回滚到 best snapshot | 不等 mode 切换，即时止损 |
-| **P2-2 可观测性导出** | metrics_timeline 导出为时序 JSON | 收敛轨迹事后可分析 |
+>
+> 不需要 Claude，不需要 GPT 配额。ASR 把 LLM 当执行器（不可控、有随机性），用控制论闭环驱动它稳定收敛——任意 OpenAI 兼容接口即可运行。
 
 ---
 
-## 工作原理
+## ✨ 核心特性
 
 ```
-DESIGN.md（规格文档）
-     │
-     ▼
-┌──────────────────────────────────────────────────────┐
-│                  ASR 收敛运行时                        │
-│                                                      │
-│  ① REPAIRING  →  ② TESTING  →  ③ ANALYZING          │
-│     Builder        Tester        Analyzer             │
-│     生成/修复       pytest验证     语义对比DESIGN       │
-│       ▲               │              │               │
-│       │          退化检测         对齐?               │
-│       │          _best_snapshot    ↓                  │
-│       └── 修复指令 ←──┴──── CONVERGED                 │
-│                                                      │
-│  ④ 控制论决策（每轮）                                  │
-│     ConvergenceMetrics → trend / oscillation         │
-│     Circuit Breaker → 连续 N 轮无改善则停             │
-│     RepairMode auto-switch → hysteresis 切换         │
-└──────────────────────────────────────────────────────┘
-     │
-     ▼
-完整工程项目（含测试、文档）
+目标（DESIGN.md）──▶ 控制器（ASRController）──▶ 执行器（Builder / LLM）──▶ 被控对象（代码）
+                                                                              │
+                        反馈 ◀── 传感器（Tester pytest + Analyzer 语义）◀──────┘
 ```
 
-### RepairMode 状态机
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🔒 五重控制论保障
+
+| 要求 | 实现机制 |
+|:---:|---|
+| **反馈可靠** | `test_pass_rate` 地面真值，Analyzer 降级为辅助 |
+| **执行器约束** | RepairMode 状态机（6 模式）+ Patch 限幅 + Formal Guards |
+| **系统稳定** | 振荡检测 + Circuit Breaker + 退化回滚 + Hysteresis 防抖 |
+| **可观测** | ConvergenceMetrics（15+ 字段）+ 全事件文件化 + 可回放 |
+| **可控制** | RepairMode 自动切换 + FINAL_VERIFICATION 防假收敛 |
+
+</td>
+<td width="50%" valign="top">
+
+### 🚀 v2.0 新增优化
+
+| 优化 | 效果 |
+|---|---|
+| **增量测试** | 反馈延迟从 O(全量) → O(子集)，每 3 轮全量校准 |
+| **前馈控制** | Builder 不再"失忆"重复错误修改模式 |
+| **双传感器仲裁** | test_pass 与 Analyzer 分歧时触发，防假收敛 |
+| **自适应限幅** | 振荡收紧 1/3，improving 放宽 1.5x |
+| **A/B 回滚** | 回归 >15% 立即回滚，不等 mode 切换 |
+| **可观测导出** | metrics_timeline 时序 JSON，事后可分析 |
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🏗️ 工作原理
+
+```
+                    DESIGN.md（规格文档）
+                          │
+                          ▼
+          ┌───────────────────────────────────────┐
+          │           ASR 收敛运行时                │
+          │                                       │
+          │   ① REPAIRING → ② TESTING → ③ ANALYZING │
+          │      Builder      Tester      Analyzer  │
+          │      生成/修复    pytest验证   语义对比   │
+          │        ▲            │            │     │
+          │        │      退化检测        对齐?     │
+          │        │      _best_snapshot     │     │
+          │        └── 修复指令 ←──┴── CONVERGED   │
+          │                                       │
+          │   ④ 控制论决策（每轮执行）              │
+          │      ConvergenceMetrics → trend        │
+          │      Circuit Breaker → 无改善则停      │
+          │      RepairMode → hysteresis 切换     │
+          └───────────────────────────────────────┘
+                          │
+                          ▼
+              完整工程项目（含测试、文档）
+```
+
+<details>
+<summary><b>📋 RepairMode 状态机（点击展开）</b></summary>
+
+<br>
 
 六种修复模式，每种实质改变 Controller 对 Builder 的调用方式，通过 hysteresis 自动切换：
 
 ```
-INITIAL_GENERATION → TEST_FIX ←────────────────────┐
-                       ↓ (stalled ≥ 2)              │
-                   SPEC_COMPLETION                   │
-                       ↓ (oscillation ≥ 0.7)        │
+INITIAL_GENERATION → TEST_FIX ←─────────────────────┐
+                       ↓ (stalled ≥ 2)               │
+                   SPEC_COMPLETION                    │
+                       ↓ (oscillation ≥ 0.7)         │
                    OSCILLATION_BREAK ──(improving ≥ 2)──┘
                        ↓ (regressing ≥ 2)
                    REGRESSION_RECOVERY ──(improving ≥ 1)──→ TEST_FIX
                        ↓ (tests pass, no analyzer)
-                   FINAL_VERIFICATION ──(Analyzer: ALL CLEAR)──→ 收敛
+                   FINAL_VERIFICATION ──(ALL CLEAR)──→ ✅ 收敛
 ```
 
-### Formal Guards（硬约束三件套）
+</details>
+
+<details>
+<summary><b>🛡️ Formal Guards — 硬约束三件套（点击展开）</b></summary>
+
+<br>
 
 | Guard | 检测内容 | 动作 |
 |:---:|---|---|
-| 测试删除检测 | Builder 删除了 test_*.py 或 tests/ 下的文件 | 拒绝 patch + 回滚 |
-| 语法检查 | 对所有 .py 文件执行 `ast.parse()` | 拒绝 patch + 回滚 |
+| 测试删除检测 | Builder 删除了 `test_*.py` 或 `tests/` 下的文件 | 拒绝 patch + 回滚 |
+| 语法检查 | 对所有 `.py` 文件执行 `ast.parse()` | 拒绝 patch + 回滚 |
 | Bypass 检测 | `except:`、`return expected`、`@pytest.mark.skip`、生产代码中的 `mock` | 拒绝 patch + 回滚 |
+
+</details>
 
 ---
 
-## 快速开始
+## 🚀 快速开始
 
 ### 环境要求
 
-- **操作系统**：macOS / Linux
-- **Python**：3.12+
-- **Node.js**：18+（opencode CLI 依赖）
-- **opencode CLI**：>= 1.15（LLM 调用后端）
+| 依赖 | 版本 | 说明 |
+|---|---|---|
+| 操作系统 | macOS / Linux | — |
+| Python | 3.12+ | 推荐 pyenv 管理 |
+| Node.js | 18+ | opencode CLI 依赖 |
+| opencode CLI | >= 1.15 | LLM 调用后端 |
 
-### 1. 安装 ASR
+### Step 1 — 安装 ASR
 
 ```bash
 git clone https://github.com/georgewangchn/AI-Software-Runtime.git
@@ -120,18 +160,17 @@ cd AI-Software-Runtime
 
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -e .
 ```
 
-### 2. 安装 opencode CLI
+### Step 2 — 安装 opencode CLI
 
 ```bash
 npm install -g opencode-ai
 opencode --version
 ```
 
-### 3. 初始化项目
+### Step 3 — 初始化项目
 
 ```bash
 asr init --project my_project
@@ -139,7 +178,7 @@ asr init --project my_project
 
 自动生成 `DESIGN.md`（规格模板）+ `.opencode/config.json`（LLM 配置模板）+ `asr_config.yaml`。
 
-### 4. 配置 LLM
+### Step 4 — 配置 LLM
 
 编辑 `my_project/.opencode/config.json`，填入你的 LLM provider：
 
@@ -166,15 +205,15 @@ asr init --project my_project
 }
 ```
 
-支持任意 OpenAI 兼容接口（vLLM / Ollama / OpenAI 官方 / DeepSeek 等）。
+> 支持任意 OpenAI 兼容接口：vLLM / Ollama / OpenAI 官方 / DeepSeek 等。
 
-### 5. 环境检查
+### Step 5 — 环境检查
 
 ```bash
 asr doctor --project my_project
 ```
 
-### 6. 运行
+### Step 6 — 运行
 
 ```bash
 asr run --project my_project --max-iterations 20
@@ -199,34 +238,36 @@ ASR 收敛运行时 [直接模式]
 
 ---
 
-## 项目结构
+## 📁 项目结构
 
 ```
 asr/
-├── asr/                            # 核心代码
-│   ├── agents/                     # 智能体
-│   │   ├── builder.py              #   Builder：代码生成与修复（带会话延续）
-│   │   ├── tester.py               #   Tester：pytest 执行（Sandbox 隔离 + 增量测试）
-│   │   ├── analyzer.py             #   Analyzer：diff-only 模式 + 结构化偏差分析
-│   │   ├── opencode_backend.py     #   opencode CLI 子进程调用后端
-│   │   └── llm_tracker.py          #   Token 消耗追踪
+├── asr/                              # 核心代码
+│   ├── agents/                       # 智能体
+│   │   ├── builder.py                #   Builder：代码生成与修复（带会话延续）
+│   │   ├── tester.py                 #   Tester：pytest 执行（Sandbox 隔离 + 增量测试）
+│   │   ├── analyzer.py               #   Analyzer：diff-only + 结构化偏差分析
+│   │   ├── opencode_backend.py       #   opencode CLI 子进程调用后端
+│   │   └── llm_tracker.py            #   Token 消耗追踪
 │   ├── controller/
-│   │   └── convergence.py          # 收敛控制器（~1400行）：控制论指标 + RepairMode + 退化回滚
+│   │   └── convergence.py            # 收敛控制器（~1400行）
 │   ├── cli/
-│   │   └── main.py                 # CLI 入口（init / doctor / run / compare）
-│   ├── config/                     # Pydantic v2 配置模型
-│   ├── events/                     # 20 种事件类型 + EventStore（文件化 A2A 通信）
-│   ├── dag/                        # Task DAG 并行执行
-│   └── runtime.py                  # 运行时入口
-├── tests/                          # 单元测试（226 passed）
-├── pyproject.toml                  # 包定义 + asr CLI 入口
-├── .env.example                    # 环境变量配置模板
-└── README.md
+│   │   └── main.py                   # CLI 入口（init / doctor / run / compare）
+│   ├── config/                       # Pydantic v2 配置模型
+│   ├── events/                       # 20 种事件类型 + EventStore
+│   ├── dag/                          # Task DAG 并行执行
+│   └── runtime.py                    # 运行时入口
+├── tests/                            # 单元测试（226 passed）
+├── pyproject.toml                    # 包定义 + asr CLI 入口
+└── .env.example                      # 环境变量配置模板
 ```
 
 ---
 
-## CLI 命令
+## 📚 参考
+
+<details>
+<summary><b>CLI 命令速查</b></summary>
 
 | 命令 | 说明 |
 |---|---|
@@ -235,9 +276,10 @@ asr/
 | `asr run --project <dir> --max-iterations N` | 运行收敛循环 |
 | `asr compare --project <dir> --spec <yaml>` | 对比方案效果 |
 
----
+</details>
 
-## 环境变量
+<details>
+<summary><b>环境变量</b></summary>
 
 | 变量 | 必填 | 说明 |
 |------|:---:|------|
@@ -248,18 +290,20 @@ asr/
 | `ASR_OPENCODE_TIMEOUT` | | opencode 调用超时秒数（默认 24400） |
 | `ASR_VERBOSE` | | 设为 `1` 启用详细日志 |
 
----
+</details>
 
-## 相关文档
+### 相关文档
 
 | 文档 | 说明 |
 |---|---|
-| [技术报告 (v2.0)](./AI%20Software%20Runtime(ASR)技术报告.md) | 系统架构设计、控制论优化体系、端到端验证、DAG 调度、事件总线 |
-| [原始构想](./Supervise-Agent：有监督长任务自动化软件工程系统.md) | 项目最初想法：分层裁决 + 多Agent协同 + 工程约束 |
-| [在线演示](https://georgewangchn.github.io/AI-Software-Runtime/) | 系统效果验证测试报告，对比四种方案的实际生成效果 |
+| 📖 [技术报告 (v2.0)](./AI%20Software%20Runtime(ASR)技术报告.md) | 系统架构设计、控制论优化体系、端到端验证、DAG 调度、事件总线 |
+| 💡 [原始构想](./Supervise-Agent：有监督长任务自动化软件工程系统.md) | 项目最初想法：分层裁决 + 多Agent协同 + 工程约束 |
+| 🌐 [在线演示](https://georgewangchn.github.io/AI-Software-Runtime/) | 系统效果验证测试报告，对比四种方案的实际生成效果 |
 
 ---
 
-## License
+<div align="center">
 
-MIT
+**MIT License**
+
+</div>
